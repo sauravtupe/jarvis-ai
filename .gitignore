@@ -16,3 +16,4 @@ database/camera_captures/
 server_stdout.txt
 server_stderr.txt
 JARVIS_AI/
+.claude/
