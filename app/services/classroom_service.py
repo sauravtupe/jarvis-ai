@@ -24,23 +24,22 @@ _PROMPT = (
 )
 
 
-def analyse_frame(frame_base64: str, openai_api_key: str) -> dict:
-    from openai import OpenAI
+def analyse_frame(frame_base64: str, groq_api_key: str, vision_model: str) -> dict:
+    from groq import Groq
 
-    client = OpenAI(api_key=openai_api_key)
+    client = Groq(api_key=groq_api_key)
+
+    data_url = f"data:image/jpeg;base64,{frame_base64}"
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model=vision_model,
         messages=[
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{frame_base64}",
-                            "detail": "auto",
-                        },
+                        "image_url": {"url": data_url},
                     },
                     {"type": "text", "text": _PROMPT},
                 ],
@@ -50,7 +49,7 @@ def analyse_frame(frame_base64: str, openai_api_key: str) -> dict:
     )
 
     raw = (response.choices[0].message.content or "").strip()
-    logger.info("[CLASSROOM] Raw GPT-4o response: %s", raw[:500])
+    logger.info("[CLASSROOM] Raw Groq response: %s", raw[:500])
     raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
     raw = re.sub(r"\s*```$", "", raw, flags=re.MULTILINE).strip()
 
@@ -62,7 +61,7 @@ def analyse_frame(frame_base64: str, openai_api_key: str) -> dict:
             result = json.loads(m.group(0))
         else:
             logger.error("[CLASSROOM] Failed to parse JSON. Full response: %s", raw[:1000])
-            raise ValueError(f"Could not parse classroom JSON from GPT-4o response: {raw[:200]}")
+            raise ValueError(f"Could not parse classroom JSON from response: {raw[:200]}")
 
     logger.info(
         "[CLASSROOM] Analysed: %d total, %d attentive, %d distracted, attention=%s%%",

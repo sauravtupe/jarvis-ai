@@ -58,7 +58,7 @@ from config import (
     VECTOR_STORE_DIR, GROQ_API_KEYS, GROQ_MODEL, TAVILY_API_KEY,
     EMBEDDING_MODEL, CHUNK_SIZE, CHUNK_OVERLAP, MAX_CHAT_HISTORY_TURNS,
     ASSISTANT_NAME, TTS_VOICE, TTS_RATE, MAX_UPLOAD_SIZE_MB,
-    CHATS_DATA_DIR, OPENAI_API_KEY,
+    CHATS_DATA_DIR, OPENAI_API_KEY, GROQ_VISION_MODEL,
     SUPABASE_URL, SUPABASE_ANON_KEY,
 )
 
@@ -955,12 +955,14 @@ async def generate_summary(request: SummaryRequest):
 
 @app.post("/classroom/analyse")
 async def classroom_analyse(request: ClassroomAnalyseRequest):
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured. Add it to your .env file.")
+    if not GROQ_API_KEYS:
+        raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured.")
 
     from app.services import classroom_service
     try:
-        result = classroom_service.analyse_frame(request.frame_base64, OPENAI_API_KEY)
+        result = classroom_service.analyse_frame(
+            request.frame_base64, GROQ_API_KEYS[0], GROQ_VISION_MODEL
+        )
         return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

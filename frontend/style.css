@@ -2310,3 +2310,38 @@ textarea { font-family: var(--font); color: var(--text); }
 }
 
 @media (max-width: 480px) { #avatar-container { display: none; } }
+
+/* ── Mobile-specific header fixes ───────────────────────────────────────── */
+@media (max-width: 480px) {
+    /* Hide non-essential header buttons on small phones */
+    .classroom-btn { display: none !important; }
+    .activity-toggle { display: none !important; }
+
+    /* Compact user pill: hide email text, show only a small avatar circle */
+    .user-pill {
+        padding: 0 !important;
+        background: rgba(124, 106, 239, 0.15) !important;
+        border-radius: 50% !important;
+        width: 30px !important;
+        height: 30px !important;
+        min-width: 30px !important;
+        justify-content: center !important;
+        max-width: 30px !important;
+    }
+    .user-email-short { display: none !important; }
+    .logout-btn {
+        width: 30px !important;
+        height: 30px !important;
+        border-radius: 50% !important;
+    }
+
+    /* Ensure header doesn't overflow */
+    .header { overflow: hidden; }
+    .header-center { flex-shrink: 1; }
+    .header-left { flex-shrink: 0; }
+}
+
+@media (max-width: 360px) {
+    .logo { font-size: 0.78rem !important; letter-spacing: 1px !important; }
+    .settings-btn { display: none !important; }
+}

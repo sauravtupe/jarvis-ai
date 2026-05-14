@@ -563,6 +563,9 @@ function startListening() {
         isListening = false;
         if (micBtn) micBtn.classList.remove('listening');
         if (speechWidget) speechWidget.classList.remove('visible');
+        // Recreate recognition to fix broken state (e.g. after task opens a new tab)
+        recognition = null;
+        initSpeech();
         if (isSafariOrIOS()) showToast('Tap the mic to continue voice input.');
     }
 }
