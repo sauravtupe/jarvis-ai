@@ -113,11 +113,13 @@ State each fact ONCE. Never repeat the same point. "A, B, and C." — not "A and
 
 _JARVIS_SYSTEM_PROMPT_BASE_FMT = _JARVIS_SYSTEM_PROMPT_BASE.format(assistant_name=ASSISTANT_NAME)
 
+_extras = []
+if JARVIS_OWNER_NAME:
+    _extras.append(f"- Your owner and the person you serve is: {JARVIS_OWNER_NAME}. Always refer to them by this name when relevant.")
 if JARVIS_USER_TITLE:
-    JARVIS_SYSTEM_PROMPT = _JARVIS_SYSTEM_PROMPT_BASE_FMT + f"\n- When appropriate, you may address the user as: {JARVIS_USER_TITLE}"
+    _extras.append(f"- When appropriate, address the user as: {JARVIS_USER_TITLE}")
 
-else:
-    JARVIS_SYSTEM_PROMPT = _JARVIS_SYSTEM_PROMPT_BASE_FMT
+JARVIS_SYSTEM_PROMPT = _JARVIS_SYSTEM_PROMPT_BASE_FMT + ("\n" + "\n".join(_extras) if _extras else "")
 
 GENERAL_CHAT_ADDENDUM = """
 You are in GENERAL mode (no web search). Answer from your knowledge and the context provided (learning data, conversation history). Answer confidently and briefly. Never tell the user to search online or check a website — you are their source. Default to 1-2 sentences; only elaborate when the user asks for more or the question clearly needs it. If you have relevant context from the user's learning data, use it naturally without mentioning the source.
