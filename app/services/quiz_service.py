@@ -56,16 +56,14 @@ def _join_fetched(fetched) -> str:
 
 def _try_transcript_api(video_id: str) -> Optional[str]:
     """Try manual then auto-generated captions via youtube-transcript-api v1.x."""
-    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+    from youtube_transcript_api import YouTubeTranscriptApi
 
     api = YouTubeTranscriptApi()
 
     try:
         tlist = api.list(video_id)
-    except (TranscriptsDisabled, NoTranscriptFound):
-        return None
     except Exception as e:
-        logger.debug("[YT] list failed for %s: %s", video_id, e)
+        logger.debug("[YT] transcript-api list failed for %s: %s", video_id, type(e).__name__)
         return None
 
     preferred = ["en", "en-US", "en-GB", "en-IN", "en-AU"]
@@ -96,7 +94,7 @@ def _try_transcript_api(video_id: str) -> Optional[str]:
     except Exception:
         pass
 
-    # Any auto-generated transcript
+    # Any auto-generated transcript (any language — better than nothing)
     try:
         for t in tlist:
             if t.is_generated:
@@ -107,6 +105,56 @@ def _try_transcript_api(video_id: str) -> Optional[str]:
         pass
 
     return None
+
+
+def _try_subtitle_download(video_id: str) -> Optional[str]:
+    """Download auto-subtitles via yt-dlp (no audio needed — much lighter)."""
+    import os
+    import shutil
+    import tempfile
+
+    import yt_dlp
+
+    tmpdir = tempfile.mkdtemp(prefix="jarvis_sub_")
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        ydl_opts = {
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en", "en-US", "en-GB", "en-IN", "en-AU"],
+            "subtitlesformat": "vtt",
+            "outtmpl": os.path.join(tmpdir, "sub.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        for fname in os.listdir(tmpdir):
+            fpath = os.path.join(tmpdir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if not fname.endswith((".vtt", ".srt", ".ttml")):
+                continue
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            # Strip VTT/SRT timing lines and markup
+            text = re.sub(r'\d{2}:\d{2}[\d:.,]+ --> \d{2}:\d{2}[\d:.,]+[^\n]*\n?', '', content)
+            text = re.sub(r'^WEBVTT.*\n?', '', text, flags=re.MULTILINE)
+            text = re.sub(r'^\d+\s*\n', '', text, flags=re.MULTILINE)
+            text = re.sub(r'<[^>]+>', '', text)
+            text = ' '.join(text.split())
+            if len(text) > 80:
+                logger.info("[YT-SUB] yt-dlp subtitle for %s: %d chars", video_id, len(text))
+                return text[:20000]
+        return None
+    except Exception as e:
+        logger.debug("[YT-SUB] Subtitle download failed for %s: %s", video_id, e)
+        return None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _try_whisper(video_id: str) -> str:
@@ -172,13 +220,27 @@ def _try_whisper(video_id: str) -> str:
 
 
 def get_transcript(video_id: str) -> str:
-    """Fetch transcript: manual captions → auto-generated → yt-dlp + Groq Whisper."""
+    """Fetch transcript: captions API → yt-dlp subtitles → yt-dlp audio + Groq Whisper."""
+    # Tier 1: YouTube Transcript API (fast, works for most captioned videos)
     transcript = _try_transcript_api(video_id)
     if transcript:
         return transcript
 
-    logger.info("[YT] No captions — falling back to Whisper for %s", video_id)
-    return _try_whisper(video_id)
+    # Tier 2: yt-dlp subtitle download (no audio — works when API is blocked)
+    logger.info("[YT] No captions via API — trying yt-dlp subtitles for %s", video_id)
+    transcript = _try_subtitle_download(video_id)
+    if transcript:
+        return transcript
+
+    # Tier 3: Download audio and transcribe with Groq Whisper
+    logger.info("[YT] No subtitles — falling back to Whisper for %s", video_id)
+    try:
+        return _try_whisper(video_id)
+    except Exception as e:
+        err = str(e)
+        if "25 MB" in err or "too large" in err.lower():
+            raise ValueError("This video is too long to transcribe (audio exceeds 25 MB limit).")
+        raise ValueError(f"Could not get transcript for this video. The video may have no captions and audio download failed: {err}")
 
 
 def generate_mcqs(transcript: str, groq_api_key: str) -> List[dict]:

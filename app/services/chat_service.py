@@ -385,8 +385,14 @@ class ChatService:
                 return
 
             if _status == "failed" or not _pending_yt.get("transcript"):
+                _err_detail = _pending_yt.get("error", "")
                 self.clear_session_metadata(session_id, "pending_youtube")
-                _fail_resp = "Sir, I wasn't able to analyse this video. It may be private, age-restricted, or not publicly accessible."
+                if "too long" in _err_detail.lower() or "25 mb" in _err_detail.lower():
+                    _fail_resp = "Sir, this video is too long to transcribe — the audio exceeds the 25 MB processing limit. Try a shorter video."
+                elif "no captions" in _err_detail.lower() or "audio download failed" in _err_detail.lower():
+                    _fail_resp = "Sir, this video has no captions and I couldn't download the audio to transcribe it. Try a video that has auto-generated subtitles enabled."
+                else:
+                    _fail_resp = "Sir, I couldn't get the transcript for this video. Please make sure the video is public and has captions or auto-generated subtitles, then try again."
                 self.sessions[session_id][-1].content = _fail_resp
                 yield _fail_resp
                 self.save_chat_session(session_id)
