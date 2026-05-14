@@ -955,14 +955,12 @@ async def generate_summary(request: SummaryRequest):
 
 @app.post("/classroom/analyse")
 async def classroom_analyse(request: ClassroomAnalyseRequest):
-    if not GROQ_API_KEYS:
-        raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured.")
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured.")
 
     from app.services import classroom_service
     try:
-        result = classroom_service.analyse_frame(
-            request.frame_base64, GROQ_API_KEYS[0], GROQ_VISION_MODEL
-        )
+        result = classroom_service.analyse_frame(request.frame_base64, OPENAI_API_KEY)
         return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

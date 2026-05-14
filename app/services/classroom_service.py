@@ -24,15 +24,15 @@ _PROMPT = (
 )
 
 
-def analyse_frame(frame_base64: str, groq_api_key: str, vision_model: str) -> dict:
-    from groq import Groq
+def analyse_frame(frame_base64: str, openai_api_key: str) -> dict:
+    from openai import OpenAI
 
-    client = Groq(api_key=groq_api_key)
+    client = OpenAI(api_key=openai_api_key)
 
     data_url = f"data:image/jpeg;base64,{frame_base64}"
 
     response = client.chat.completions.create(
-        model=vision_model,
+        model="gpt-4o",
         messages=[
             {
                 "role": "user",
@@ -49,7 +49,7 @@ def analyse_frame(frame_base64: str, groq_api_key: str, vision_model: str) -> di
     )
 
     raw = (response.choices[0].message.content or "").strip()
-    logger.info("[CLASSROOM] Raw Groq response: %s", raw[:500])
+    logger.info("[CLASSROOM] Raw OpenAI response: %s", raw[:500])
     raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
     raw = re.sub(r"\s*```$", "", raw, flags=re.MULTILINE).strip()
 
