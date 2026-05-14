@@ -157,6 +157,30 @@ def _try_subtitle_download(video_id: str) -> Optional[str]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _try_assemblyai(video_id: str, api_key: str) -> str:
+    """Transcribe via AssemblyAI — works from any IP including HuggingFace cloud."""
+    import assemblyai as aai
+
+    aai.settings.api_key = api_key
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    config = aai.TranscriptionConfig(speech_model=aai.SpeechModel.nano)
+    transcriber = aai.Transcriber(config=config)
+
+    logger.info("[ASSEMBLYAI] Submitting %s for transcription...", video_id)
+    transcript = transcriber.transcribe(url)
+
+    if transcript.status == aai.TranscriptStatus.error:
+        raise ValueError(f"AssemblyAI transcription failed: {transcript.error}")
+
+    text = (transcript.text or "").strip()
+    if not text:
+        raise ValueError("AssemblyAI returned empty transcript")
+
+    logger.info("[ASSEMBLYAI] Done: %d chars", len(text))
+    return text[:20000]
+
+
 def _try_whisper(video_id: str) -> str:
     """Download audio with yt-dlp and transcribe via Groq Whisper (whisper-large-v3)."""
     import os
@@ -220,20 +244,30 @@ def _try_whisper(video_id: str) -> str:
 
 
 def get_transcript(video_id: str) -> str:
-    """Fetch transcript: captions API → yt-dlp subtitles → yt-dlp audio + Groq Whisper."""
-    # Tier 1: YouTube Transcript API (fast, works for most captioned videos)
+    """Fetch transcript: captions API → yt-dlp subtitles → AssemblyAI → Groq Whisper."""
+    from config import ASSEMBLYAI_API_KEY
+
+    # Tier 1: YouTube Transcript API (fast, free, works for captioned videos)
     transcript = _try_transcript_api(video_id)
     if transcript:
         return transcript
 
-    # Tier 2: yt-dlp subtitle download (no audio — works when API is blocked)
+    # Tier 2: yt-dlp subtitle download (free, no audio — works when API is blocked)
     logger.info("[YT] No captions via API — trying yt-dlp subtitles for %s", video_id)
     transcript = _try_subtitle_download(video_id)
     if transcript:
         return transcript
 
-    # Tier 3: Download audio and transcribe with Groq Whisper
-    logger.info("[YT] No subtitles — falling back to Whisper for %s", video_id)
+    # Tier 3: AssemblyAI — works from any IP including cloud/HuggingFace
+    if ASSEMBLYAI_API_KEY:
+        logger.info("[YT] No subtitles — trying AssemblyAI for %s", video_id)
+        try:
+            return _try_assemblyai(video_id, ASSEMBLYAI_API_KEY)
+        except Exception as e:
+            logger.warning("[ASSEMBLYAI] Failed for %s: %s", video_id, e)
+
+    # Tier 4: yt-dlp audio + Groq Whisper (works locally, may fail on cloud IPs)
+    logger.info("[YT] Falling back to Whisper for %s", video_id)
     try:
         return _try_whisper(video_id)
     except Exception as e:

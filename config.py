@@ -31,6 +31,9 @@ AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 # OpenAI (Feature 4 — Classroom Attention AI)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
+# AssemblyAI (YouTube transcription — works from any IP including cloud)
+ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY", "")
+
 # Supabase (Feature 7 — Google Auth)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
