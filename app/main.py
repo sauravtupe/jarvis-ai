@@ -120,6 +120,20 @@ def _clean_old_s3_captures():
     logger.info("[SCHEDULER] S3 cleanup: deleted %d / %d camera objects", deleted, len(keys))
 
 
+def _keep_alive_ping():
+    """Ping /health to prevent HF Space from sleeping. Runs every 4 minutes."""
+    import os, requests as _req
+    host = os.getenv("SPACE_HOST", "").strip()
+    if not host:
+        return
+    url = f"https://{host}/health"
+    try:
+        r = _req.get(url, timeout=10)
+        logger.info("[KEEP-ALIVE] Pinged %s → %s", url, r.status_code)
+    except Exception as e:
+        logger.warning("[KEEP-ALIVE] Ping failed: %s", e)
+
+
 @asynccontextmanager
 
 async def lifespan(app: FastAPI):
@@ -201,8 +215,10 @@ async def lifespan(app: FastAPI):
         scheduler = BackgroundScheduler()
         scheduler.add_job(_clean_old_s3_captures, "interval", hours=1,
                           id="s3_cleanup", replace_existing=True)
+        scheduler.add_job(_keep_alive_ping, "interval", minutes=4,
+                          id="keep_alive", replace_existing=True)
         scheduler.start()
-        logger.info("[SCHEDULER] APScheduler started — S3 camera cleanup every 1h (>8h objects)")
+        logger.info("[SCHEDULER] APScheduler started — S3 cleanup every 1h, keep-alive ping every 4min")
 
         yield
 
