@@ -1,3 +1,13 @@
+---
+title: Jarvis AI
+emoji: 🤖
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # J.A.R.V.I.S — Just A Rather Very Intelligent System
 
 A personal AI assistant with a beautiful web UI. Talk to it, ask questions, search the web, generate images, analyze camera photos, and more. Runs completely on your own machine with one command.
