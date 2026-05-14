@@ -259,12 +259,17 @@ def get_transcript(video_id: str) -> str:
         return transcript
 
     # Tier 3: AssemblyAI — works from any IP including cloud/HuggingFace
+    assemblyai_err = ""
     if ASSEMBLYAI_API_KEY:
         logger.info("[YT] No subtitles — trying AssemblyAI for %s", video_id)
         try:
             return _try_assemblyai(video_id, ASSEMBLYAI_API_KEY)
         except Exception as e:
-            logger.warning("[ASSEMBLYAI] Failed for %s: %s", video_id, e)
+            assemblyai_err = str(e)
+            logger.warning("[ASSEMBLYAI] Failed for %s: %s", video_id, assemblyai_err)
+    else:
+        assemblyai_err = "ASSEMBLYAI_API_KEY not configured"
+        logger.warning("[YT] ASSEMBLYAI_API_KEY not set — skipping AssemblyAI for %s", video_id)
 
     # Tier 4: yt-dlp audio + Groq Whisper (works locally, may fail on cloud IPs)
     logger.info("[YT] Falling back to Whisper for %s", video_id)
@@ -274,7 +279,9 @@ def get_transcript(video_id: str) -> str:
         err = str(e)
         if "25 MB" in err or "too large" in err.lower():
             raise ValueError("This video is too long to transcribe (audio exceeds 25 MB limit).")
-        raise ValueError(f"Could not get transcript for this video. The video may have no captions and audio download failed: {err}")
+        if "not configured" in assemblyai_err:
+            raise ValueError("ASSEMBLYAI_KEY_MISSING: AssemblyAI API key is not set. Please add ASSEMBLYAI_API_KEY to HuggingFace Secrets.")
+        raise ValueError(f"ASSEMBLYAI_FAILED: {assemblyai_err}")
 
 
 def generate_mcqs(transcript: str, groq_api_key: str) -> List[dict]:

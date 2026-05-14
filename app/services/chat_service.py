@@ -389,6 +389,10 @@ class ChatService:
                 self.clear_session_metadata(session_id, "pending_youtube")
                 if "too long" in _err_detail.lower() or "25 mb" in _err_detail.lower():
                     _fail_resp = "Sir, this video is too long to transcribe — the audio exceeds the 25 MB processing limit. Try a shorter video."
+                elif "assemblyai_key_missing" in _err_detail.lower():
+                    _fail_resp = "Sir, the AssemblyAI API key is not configured. Please add ASSEMBLYAI_API_KEY to your HuggingFace Secrets and restart the space."
+                elif "assemblyai_failed" in _err_detail.lower():
+                    _fail_resp = f"Sir, AssemblyAI transcription failed. Details: {_err_detail.replace('ASSEMBLYAI_FAILED: ', '')}"
                 elif "no captions" in _err_detail.lower() or "audio download failed" in _err_detail.lower():
                     _fail_resp = "Sir, this video has no captions and I couldn't download the audio to transcribe it. Try a video that has auto-generated subtitles enabled."
                 else:
