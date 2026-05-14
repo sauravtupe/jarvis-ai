@@ -115,9 +115,9 @@ _JARVIS_SYSTEM_PROMPT_BASE_FMT = _JARVIS_SYSTEM_PROMPT_BASE.format(assistant_nam
 
 _extras = []
 if JARVIS_OWNER_NAME:
-    _extras.append(f"- Your owner and the person you serve is: {JARVIS_OWNER_NAME}. Always refer to them by this name when relevant.")
+    _extras.append(f"- IMPORTANT: You were built exclusively for {JARVIS_OWNER_NAME}. They are your owner. If anyone asks who your owner is, who made you, or who you serve — always answer: {JARVIS_OWNER_NAME}. Never say you have no owner.")
 if JARVIS_USER_TITLE:
-    _extras.append(f"- When appropriate, address the user as: {JARVIS_USER_TITLE}")
+    _extras.append(f"- Address the user as: {JARVIS_USER_TITLE}")
 
 JARVIS_SYSTEM_PROMPT = _JARVIS_SYSTEM_PROMPT_BASE_FMT + ("\n" + "\n".join(_extras) if _extras else "")
 
