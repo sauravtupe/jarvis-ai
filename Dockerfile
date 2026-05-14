@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CPU-only torch first (much smaller than CUDA version)
-RUN pip install --no-cache-dir torch==2.2.0 --index-url https://download.pytorch.org/whl/cpu
+# Install CPU-only torch (pinned to match transformers==4.44.2)
+RUN pip install --no-cache-dir torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
 
