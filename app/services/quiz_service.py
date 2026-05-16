@@ -170,7 +170,7 @@ def _try_assemblyai(video_id: str, api_key: str) -> str:
     logger.info("[ASSEMBLYAI] Submitting %s for transcription...", video_id)
     submit_resp = _req.post(
         "https://api.assemblyai.com/v2/transcript",
-        json={"audio_url": yt_url, "language_detection": True},
+        json={"audio_url": yt_url, "speech_models": ["universal-2"], "language_detection": True},
         headers=headers,
         timeout=30,
     )
