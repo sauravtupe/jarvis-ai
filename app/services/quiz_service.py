@@ -164,7 +164,8 @@ def _try_assemblyai(video_id: str, api_key: str) -> str:
     aai.settings.api_key = api_key
     url = f"https://www.youtube.com/watch?v={video_id}"
 
-    transcriber = aai.Transcriber()
+    config = aai.TranscriptionConfig(speech_model="universal-2")
+    transcriber = aai.Transcriber(config=config)
 
     logger.info("[ASSEMBLYAI] Submitting %s for transcription...", video_id)
     transcript = transcriber.transcribe(url)
