@@ -2031,7 +2031,7 @@ async function startSummary(videoId) {
     try {
         const res = await fetch(`${API}/quiz/summary`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
             body: JSON.stringify({ session_id: sessionId, video_id: videoId }),
         });
         if (!res.ok) {

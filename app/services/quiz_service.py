@@ -158,27 +158,49 @@ def _try_subtitle_download(video_id: str) -> Optional[str]:
 
 
 def _try_assemblyai(video_id: str, api_key: str) -> str:
-    """Transcribe via AssemblyAI — works from any IP including HuggingFace cloud."""
-    import assemblyai as aai
+    """Transcribe via AssemblyAI REST API — works from any IP including HuggingFace cloud.
+    Uses requests directly to avoid assemblyai SDK version instability."""
+    import time
+    import requests as _req
 
-    aai.settings.api_key = api_key
-    url = f"https://www.youtube.com/watch?v={video_id}"
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+    headers = {"authorization": api_key, "content-type": "application/json"}
 
-    config = aai.TranscriptionConfig(speech_model="best")
-    transcriber = aai.Transcriber(config=config)
-
+    # Submit transcription job
     logger.info("[ASSEMBLYAI] Submitting %s for transcription...", video_id)
-    transcript = transcriber.transcribe(url)
+    submit_resp = _req.post(
+        "https://api.assemblyai.com/v2/transcript",
+        json={"audio_url": yt_url, "language_detection": True},
+        headers=headers,
+        timeout=30,
+    )
+    if submit_resp.status_code != 200:
+        raise ValueError(f"AssemblyAI submit failed ({submit_resp.status_code}): {submit_resp.text[:300]}")
 
-    if transcript.status == aai.TranscriptStatus.error:
-        raise ValueError(f"AssemblyAI transcription failed: {transcript.error}")
+    transcript_id = submit_resp.json().get("id")
+    if not transcript_id:
+        raise ValueError("AssemblyAI did not return a transcript ID")
+    logger.info("[ASSEMBLYAI] Job submitted, id=%s. Polling...", transcript_id)
 
-    text = (transcript.text or "").strip()
-    if not text:
-        raise ValueError("AssemblyAI returned empty transcript")
+    # Poll until complete (max 10 minutes = 200 × 3s)
+    poll_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
+    for attempt in range(200):
+        time.sleep(3)
+        poll = _req.get(poll_url, headers=headers, timeout=30)
+        poll.raise_for_status()
+        result = poll.json()
+        status = result.get("status")
+        if status == "completed":
+            text = (result.get("text") or "").strip()
+            if not text:
+                raise ValueError("AssemblyAI returned empty transcript")
+            logger.info("[ASSEMBLYAI] Done: %d chars (attempt %d)", len(text), attempt + 1)
+            return text[:20000]
+        if status == "error":
+            raise ValueError(f"AssemblyAI error: {result.get('error', 'unknown')}")
+        logger.debug("[ASSEMBLYAI] Status=%s (attempt %d)", status, attempt + 1)
 
-    logger.info("[ASSEMBLYAI] Done: %d chars", len(text))
-    return text[:20000]
+    raise ValueError("AssemblyAI transcription timed out after 10 minutes")
 
 
 def _try_whisper(video_id: str) -> str:
