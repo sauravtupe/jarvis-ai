@@ -158,28 +158,63 @@ def _try_subtitle_download(video_id: str) -> Optional[str]:
 
 
 def _try_supadata(video_id: str, api_key: str) -> Optional[str]:
-    """Fetch transcript via Supadata API — works from any IP including HuggingFace cloud."""
+    """Fetch transcript via Supadata API — works from any IP including HuggingFace cloud.
+    Handles async jobs (HTTP 202) for videos longer than 20 minutes."""
+    import time
     import requests as _req
+
+    headers = {"x-api-key": api_key}
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    def _extract_text(data: dict) -> str:
+        content = data.get("content") or data.get("text") or ""
+        if isinstance(content, list):
+            return " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
+        return str(content)
 
     try:
         resp = _req.get(
-            "https://api.supadata.ai/v1/youtube/transcript",
-            params={"url": f"https://www.youtube.com/watch?v={video_id}", "text": "true"},
-            headers={"x-api-key": api_key},
+            "https://api.supadata.ai/v1/transcript",
+            params={"url": yt_url, "text": "true"},
+            headers=headers,
             timeout=30,
         )
+
         if resp.status_code == 200:
-            data = resp.json()
-            text = data.get("content") or data.get("text") or ""
-            if isinstance(text, list):
-                text = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in text)
-            text = str(text).strip()
+            text = _extract_text(resp.json()).strip()
             if len(text) > 80:
                 logger.info("[SUPADATA] Transcript for %s: %d chars", video_id, len(text))
                 return text[:20000]
             logger.debug("[SUPADATA] Transcript too short for %s", video_id)
-        else:
-            logger.warning("[SUPADATA] API error %d for %s: %s", resp.status_code, video_id, resp.text[:200])
+            return None
+
+        # Videos >20 min → async job
+        if resp.status_code == 202:
+            job_id = resp.json().get("job_id") or resp.json().get("id")
+            if not job_id:
+                logger.warning("[SUPADATA] 202 but no job_id for %s", video_id)
+                return None
+            logger.info("[SUPADATA] Async job %s for %s — polling...", job_id, video_id)
+            for attempt in range(60):  # max 5 minutes (60 × 5s)
+                time.sleep(5)
+                poll = _req.get(
+                    f"https://api.supadata.ai/v1/transcript/{job_id}",
+                    headers=headers,
+                    timeout=30,
+                )
+                if poll.status_code == 200:
+                    text = _extract_text(poll.json()).strip()
+                    if len(text) > 80:
+                        logger.info("[SUPADATA] Async transcript for %s: %d chars (attempt %d)", video_id, len(text), attempt + 1)
+                        return text[:20000]
+                    return None
+                if poll.status_code not in (202, 204):
+                    logger.warning("[SUPADATA] Poll error %d for job %s", poll.status_code, job_id)
+                    return None
+            logger.warning("[SUPADATA] Async job timed out for %s", video_id)
+            return None
+
+        logger.warning("[SUPADATA] API error %d for %s: %s", resp.status_code, video_id, resp.text[:200])
     except Exception as e:
         logger.debug("[SUPADATA] Failed for %s: %s", video_id, e)
     return None
