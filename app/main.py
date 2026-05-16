@@ -881,8 +881,6 @@ async def generate_quiz(request: QuizGenerateRequest, user_id: str = Depends(get
         if pending.get("status") == "fetching":
             raise HTTPException(status_code=202, detail="Transcript is still being processed. Please wait a moment.")
         transcript = pending.get("transcript")
-        # Clear metadata — quiz is consuming the transcript
-        chat_service.clear_session_metadata(request.session_id, "pending_youtube")
     else:
         transcript = None
 
@@ -930,7 +928,6 @@ async def generate_summary(request: SummaryRequest):
         if pending.get("status") == "fetching":
             raise HTTPException(status_code=202, detail="Transcript is still being processed. Please wait a moment.")
         transcript = pending.get("transcript")
-        chat_service.clear_session_metadata(request.session_id, "pending_youtube")
     else:
         transcript = None
 
