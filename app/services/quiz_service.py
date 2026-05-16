@@ -157,6 +157,34 @@ def _try_subtitle_download(video_id: str) -> Optional[str]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _try_supadata(video_id: str, api_key: str) -> Optional[str]:
+    """Fetch transcript via Supadata API — works from any IP including HuggingFace cloud."""
+    import requests as _req
+
+    try:
+        resp = _req.get(
+            "https://api.supadata.ai/v1/youtube/transcript",
+            params={"url": f"https://www.youtube.com/watch?v={video_id}", "text": "true"},
+            headers={"x-api-key": api_key},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            text = data.get("content") or data.get("text") or ""
+            if isinstance(text, list):
+                text = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in text)
+            text = str(text).strip()
+            if len(text) > 80:
+                logger.info("[SUPADATA] Transcript for %s: %d chars", video_id, len(text))
+                return text[:20000]
+            logger.debug("[SUPADATA] Transcript too short for %s", video_id)
+        else:
+            logger.warning("[SUPADATA] API error %d for %s: %s", resp.status_code, video_id, resp.text[:200])
+    except Exception as e:
+        logger.debug("[SUPADATA] Failed for %s: %s", video_id, e)
+    return None
+
+
 def _try_assemblyai(video_id: str, api_key: str) -> str:
     """Download audio via yt-dlp, upload to AssemblyAI, then transcribe.
     Passing the YouTube URL directly fails because AssemblyAI gets HTML instead of audio.
@@ -315,24 +343,35 @@ def _try_whisper(video_id: str) -> str:
 
 
 def get_transcript(video_id: str) -> str:
-    """Fetch transcript: captions API → yt-dlp subtitles → AssemblyAI → Groq Whisper."""
-    from config import ASSEMBLYAI_API_KEY
+    """Fetch transcript via 5-tier fallback chain.
+    Tiers 1-2 work locally; Tier 3 (Supadata) works from any IP including HuggingFace cloud."""
+    from config import ASSEMBLYAI_API_KEY, SUPADATA_API_KEY
 
-    # Tier 1: YouTube Transcript API (fast, free, works for captioned videos)
+    # Tier 1: YouTube Transcript API (fast, free — blocked on HuggingFace IPs)
     transcript = _try_transcript_api(video_id)
     if transcript:
         return transcript
 
-    # Tier 2: yt-dlp subtitle download (free, no audio — works when API is blocked)
+    # Tier 2: yt-dlp subtitle-only (free, no audio — blocked on HuggingFace IPs)
     logger.info("[YT] No captions via API — trying yt-dlp subtitles for %s", video_id)
     transcript = _try_subtitle_download(video_id)
     if transcript:
         return transcript
 
-    # Tier 3: AssemblyAI — works from any IP including cloud/HuggingFace
+    # Tier 3: Supadata — cloud transcript API, works from any IP including HuggingFace
+    if SUPADATA_API_KEY:
+        logger.info("[YT] Trying Supadata for %s", video_id)
+        transcript = _try_supadata(video_id, SUPADATA_API_KEY)
+        if transcript:
+            return transcript
+        logger.warning("[YT] Supadata returned no transcript for %s", video_id)
+    else:
+        logger.warning("[YT] SUPADATA_API_KEY not set — skipping Supadata for %s", video_id)
+
+    # Tier 4: AssemblyAI — yt-dlp download + upload (works locally, blocked on HuggingFace)
     assemblyai_err = ""
     if ASSEMBLYAI_API_KEY:
-        logger.info("[YT] No subtitles — trying AssemblyAI for %s", video_id)
+        logger.info("[YT] Trying AssemblyAI for %s", video_id)
         try:
             return _try_assemblyai(video_id, ASSEMBLYAI_API_KEY)
         except Exception as e:
@@ -340,9 +379,8 @@ def get_transcript(video_id: str) -> str:
             logger.warning("[ASSEMBLYAI] Failed for %s: %s", video_id, assemblyai_err)
     else:
         assemblyai_err = "ASSEMBLYAI_API_KEY not configured"
-        logger.warning("[YT] ASSEMBLYAI_API_KEY not set — skipping AssemblyAI for %s", video_id)
 
-    # Tier 4: yt-dlp audio + Groq Whisper (works locally, may fail on cloud IPs)
+    # Tier 5: yt-dlp audio + Groq Whisper (works locally, blocked on HuggingFace)
     logger.info("[YT] Falling back to Whisper for %s", video_id)
     try:
         return _try_whisper(video_id)
@@ -350,9 +388,9 @@ def get_transcript(video_id: str) -> str:
         err = str(e)
         if "25 MB" in err or "too large" in err.lower():
             raise ValueError("This video is too long to transcribe (audio exceeds 25 MB limit).")
-        if "not configured" in assemblyai_err:
-            raise ValueError("ASSEMBLYAI_KEY_MISSING: AssemblyAI API key is not set. Please add ASSEMBLYAI_API_KEY to HuggingFace Secrets.")
-        raise ValueError(f"ASSEMBLYAI_FAILED: {assemblyai_err}")
+        if not SUPADATA_API_KEY:
+            raise ValueError("SUPADATA_KEY_MISSING: Please add SUPADATA_API_KEY to HuggingFace Secrets. Get a free key at supadata.ai")
+        raise ValueError(f"All transcript methods failed. Last error: {assemblyai_err or err}")
 
 
 def generate_mcqs(transcript: str, groq_api_key: str) -> List[dict]:
