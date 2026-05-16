@@ -158,49 +158,98 @@ def _try_subtitle_download(video_id: str) -> Optional[str]:
 
 
 def _try_assemblyai(video_id: str, api_key: str) -> str:
-    """Transcribe via AssemblyAI REST API — works from any IP including HuggingFace cloud.
-    Uses requests directly to avoid assemblyai SDK version instability."""
+    """Download audio via yt-dlp, upload to AssemblyAI, then transcribe.
+    Passing the YouTube URL directly fails because AssemblyAI gets HTML instead of audio.
+    File upload bypasses YouTube's bot detection."""
+    import os
+    import shutil
+    import tempfile
     import time
     import requests as _req
+    import yt_dlp
 
-    yt_url = f"https://www.youtube.com/watch?v={video_id}"
-    headers = {"authorization": api_key, "content-type": "application/json"}
+    headers_auth = {"authorization": api_key}
+    tmpdir = tempfile.mkdtemp(prefix="jarvis_aai_")
 
-    # Submit transcription job
-    logger.info("[ASSEMBLYAI] Submitting %s for transcription...", video_id)
-    submit_resp = _req.post(
-        "https://api.assemblyai.com/v2/transcript",
-        json={"audio_url": yt_url, "speech_models": ["universal-2"], "language_detection": True},
-        headers=headers,
-        timeout=30,
-    )
-    if submit_resp.status_code != 200:
-        raise ValueError(f"AssemblyAI submit failed ({submit_resp.status_code}): {submit_resp.text[:300]}")
+    try:
+        # Step 1: Download audio with yt-dlp
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        ydl_opts = {
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+            "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+        }
 
-    transcript_id = submit_resp.json().get("id")
-    if not transcript_id:
-        raise ValueError("AssemblyAI did not return a transcript ID")
-    logger.info("[ASSEMBLYAI] Job submitted, id=%s. Polling...", transcript_id)
+        logger.info("[ASSEMBLYAI] Downloading audio for %s via yt-dlp...", video_id)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
-    # Poll until complete (max 10 minutes = 200 × 3s)
-    poll_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
-    for attempt in range(200):
-        time.sleep(3)
-        poll = _req.get(poll_url, headers=headers, timeout=30)
-        poll.raise_for_status()
-        result = poll.json()
-        status = result.get("status")
-        if status == "completed":
-            text = (result.get("text") or "").strip()
-            if not text:
-                raise ValueError("AssemblyAI returned empty transcript")
-            logger.info("[ASSEMBLYAI] Done: %d chars (attempt %d)", len(text), attempt + 1)
-            return text[:20000]
-        if status == "error":
-            raise ValueError(f"AssemblyAI error: {result.get('error', 'unknown')}")
-        logger.debug("[ASSEMBLYAI] Status=%s (attempt %d)", status, attempt + 1)
+        audio_path = next(
+            (os.path.join(tmpdir, f) for f in os.listdir(tmpdir)
+             if os.path.isfile(os.path.join(tmpdir, f))),
+            None,
+        )
+        if not audio_path:
+            raise ValueError("yt-dlp produced no audio file")
 
-    raise ValueError("AssemblyAI transcription timed out after 10 minutes")
+        size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        logger.info("[ASSEMBLYAI] Audio downloaded: %s (%.1f MB)", os.path.basename(audio_path), size_mb)
+
+        # Step 2: Upload audio bytes to AssemblyAI
+        logger.info("[ASSEMBLYAI] Uploading audio to AssemblyAI...")
+        with open(audio_path, "rb") as f:
+            upload_resp = _req.post(
+                "https://api.assemblyai.com/v2/upload",
+                headers={**headers_auth, "content-type": "application/octet-stream"},
+                data=f,
+                timeout=300,
+            )
+        if upload_resp.status_code != 200:
+            raise ValueError(f"AssemblyAI upload failed ({upload_resp.status_code}): {upload_resp.text[:200]}")
+
+        upload_url = upload_resp.json().get("upload_url")
+        if not upload_url:
+            raise ValueError("AssemblyAI did not return an upload URL")
+        logger.info("[ASSEMBLYAI] Upload done. Submitting transcription job...")
+
+        # Step 3: Submit transcription using the uploaded file URL
+        submit_resp = _req.post(
+            "https://api.assemblyai.com/v2/transcript",
+            json={"audio_url": upload_url, "language_detection": True},
+            headers={**headers_auth, "content-type": "application/json"},
+            timeout=30,
+        )
+        if submit_resp.status_code != 200:
+            raise ValueError(f"AssemblyAI submit failed ({submit_resp.status_code}): {submit_resp.text[:300]}")
+
+        transcript_id = submit_resp.json().get("id")
+        if not transcript_id:
+            raise ValueError("AssemblyAI did not return a transcript ID")
+        logger.info("[ASSEMBLYAI] Job submitted, id=%s. Polling...", transcript_id)
+
+        # Step 4: Poll until complete (max 10 minutes = 200 × 3s)
+        poll_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
+        for attempt in range(200):
+            time.sleep(3)
+            poll = _req.get(poll_url, headers=headers_auth, timeout=30)
+            poll.raise_for_status()
+            result = poll.json()
+            status = result.get("status")
+            if status == "completed":
+                text = (result.get("text") or "").strip()
+                if not text:
+                    raise ValueError("AssemblyAI returned empty transcript")
+                logger.info("[ASSEMBLYAI] Done: %d chars (attempt %d)", len(text), attempt + 1)
+                return text[:20000]
+            if status == "error":
+                raise ValueError(f"AssemblyAI error: {result.get('error', 'unknown')}")
+            logger.debug("[ASSEMBLYAI] Status=%s (attempt %d)", status, attempt + 1)
+
+        raise ValueError("AssemblyAI transcription timed out after 10 minutes")
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _try_whisper(video_id: str) -> str:
