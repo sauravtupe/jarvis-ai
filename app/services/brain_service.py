@@ -350,9 +350,6 @@ class BrainService:
         if "." in q:
             return f"https://{q}" if not q.startswith("http") else q
 
-        if q in self.SITE_MAP:
-            return self.SITE_MAP[q]
-
         return f"https://www.{q}.com"
 
     def _resolve_correction(self, msg: str, chat_history: Optional[List[Tuple[str, str]]] = None) -> str:
@@ -546,7 +543,7 @@ Classify. Output EXACTLY ONE category name."""
     def _parse_task_decisions(self, raw_response: str) -> List[Tuple[str, str]]:
 
         if not raw_response:
-            return [("open", "")]
+            return []
 
         text = raw_response.replace("\n", ",").strip()
 

@@ -172,18 +172,19 @@ class ChatService:
         messages_to_process = messages[:-1] if exclude_last and messages else messages
 
         i = 0
-        while i < len(messages_to_process) - 1:
+        while i < len(messages_to_process):
+            if messages_to_process[i].role != "user":
+                i += 1
+                continue
+            if i + 1 >= len(messages_to_process) or messages_to_process[i + 1].role != "assistant":
+                i += 1
+                continue
             user_msg = messages_to_process[i]
             ai_msg = messages_to_process[i + 1]
-
-            if user_msg.role == "user" and ai_msg.role == "assistant":
-                u_content = user_msg.content if isinstance(user_msg.content, str) else str(user_msg.content or "")
-                a_content = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content or "")
-                history.append((u_content, a_content))
-                i += 2
-            
-            else:
-                i += 1
+            u_content = user_msg.content if isinstance(user_msg.content, str) else str(user_msg.content or "")
+            a_content = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content or "")
+            history.append((u_content, a_content))
+            i += 2
 
         if len(history) > MAX_CHAT_HISTORY_TURNS:
             history = history[-MAX_CHAT_HISTORY_TURNS:]
@@ -389,6 +390,8 @@ class ChatService:
                 self.clear_session_metadata(session_id, "pending_youtube")
                 if "too long" in _err_detail.lower() or "25 mb" in _err_detail.lower():
                     _fail_resp = "Sir, this video is too long to transcribe — the audio exceeds the 25 MB processing limit. Try a shorter video."
+                elif "supadata_key_missing" in _err_detail.lower():
+                    _fail_resp = "Sir, the Supadata API key is not configured. Please add SUPADATA_API_KEY to your HuggingFace Secrets (get a free key at supadata.ai) and restart the space."
                 elif "assemblyai_key_missing" in _err_detail.lower():
                     _fail_resp = "Sir, the AssemblyAI API key is not configured. Please add ASSEMBLYAI_API_KEY to your HuggingFace Secrets and restart the space."
                 elif "assemblyai_failed" in _err_detail.lower():

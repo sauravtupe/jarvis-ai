@@ -40,8 +40,7 @@ def get_full_url(text: str) -> Optional[str]:
 
 def is_return_signal(text: str) -> bool:
     """True if the message looks like 'I'm done watching'."""
-    t = (text or "").strip()
-    return len(t) <= 40 or bool(_DONE_PATTERN.search(t))
+    return bool(_DONE_PATTERN.search((text or "").strip()))
 
 
 def _join_fetched(fetched) -> str:

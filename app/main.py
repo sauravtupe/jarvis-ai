@@ -212,13 +212,19 @@ async def lifespan(app: FastAPI):
         logger.info("Frontend: http://localhost:8000/app/ (open in browser)")
         logger.info("=" * 60)
 
+        def _cleanup_tasks():
+            if task_manager:
+                task_manager.cleanup_old()
+
         scheduler = BackgroundScheduler()
         scheduler.add_job(_clean_old_s3_captures, "interval", hours=1,
                           id="s3_cleanup", replace_existing=True)
         scheduler.add_job(_keep_alive_ping, "interval", minutes=4,
                           id="keep_alive", replace_existing=True)
+        scheduler.add_job(_cleanup_tasks, "interval", minutes=30,
+                          id="task_cleanup", replace_existing=True)
         scheduler.start()
-        logger.info("[SCHEDULER] APScheduler started — S3 cleanup every 1h, keep-alive ping every 4min")
+        logger.info("[SCHEDULER] APScheduler started — S3 cleanup every 1h, task cleanup every 30min, keep-alive ping every 4min")
 
         yield
 
