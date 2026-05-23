@@ -25,6 +25,7 @@ from app.models import (
     QuizGenerateRequest, QuizGenerateResponse, MCQQuestion,
     SummaryRequest, SummaryResponse,
     ClassroomAnalyseRequest,
+    PracticeFile, PracticeListResponse,
 )
 
 RATE_LIMIT_MESSAGE = (
@@ -523,6 +524,11 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
                 yield from _yield_completed_audio()
                 continue
 
+            if isinstance(chunk, dict) and "_practice_files" in chunk:
+                yield f"data: {json.dumps({'practice_files': chunk['_practice_files']})}\n\n"
+                yield from _yield_completed_audio()
+                continue
+
             if not chunk:
                 yield from _yield_completed_audio()
                 continue
@@ -954,6 +960,33 @@ async def generate_summary(request: SummaryRequest):
 
     logger.info("[QUIZ] Generated summary for video %s (%d chars)", request.video_id, len(summary_text))
     return SummaryResponse(summary=summary_text, video_id=request.video_id)
+
+
+@app.get("/practice/list/{class_name}", response_model=PracticeListResponse)
+async def list_practice_pdfs(class_name: str):
+    from app.services.practice_service import list_pdfs_for_class
+    from config import PRACTICE_CLASSES
+    if class_name not in PRACTICE_CLASSES:
+        raise HTTPException(status_code=404, detail=f"Unknown class: {class_name}")
+    files = list_pdfs_for_class(class_name)
+    return PracticeListResponse(class_name=class_name, files=files, count=len(files))
+
+
+@app.get("/practice/download/{class_name}/{filename}")
+async def download_practice_pdf(class_name: str, filename: str, inline: bool = False):
+    from app.services.practice_service import get_pdf_path
+    from fastapi.responses import FileResponse
+    path = get_pdf_path(class_name, filename)
+    if not path:
+        raise HTTPException(status_code=404, detail="File not found")
+    if inline:
+        return FileResponse(str(path), media_type="application/pdf")
+    return FileResponse(
+        str(path),
+        media_type="application/pdf",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/classroom/analyse")

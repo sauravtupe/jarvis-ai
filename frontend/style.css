@@ -893,6 +893,26 @@ textarea { font-family: var(--font); color: var(--text); }
     box-shadow: 0 0 0 1px rgba(78, 205, 196, 0.2);
 }
 
+/* Wake word mode — mic always on, waiting for "Jarvis" */
+.mic-btn.wake-word-mode:not(.listening):not(.wake-active) {
+    border-color: rgba(100, 200, 120, 0.5);
+    box-shadow: 0 0 0 1px rgba(100, 200, 120, 0.2);
+    animation: wakeWordAmbient 2.5s ease-in-out infinite;
+}
+@keyframes wakeWordAmbient {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(100, 200, 120, 0.15); }
+    50%       { box-shadow: 0 0 0 4px rgba(100, 200, 120, 0); }
+}
+/* Wake active — "Jarvis" heard, 10-second window open for command */
+.mic-btn.wake-active {
+    border-color: var(--accent) !important;
+    animation: wakeActivePulse 0.8s ease-in-out infinite !important;
+}
+@keyframes wakeActivePulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(124, 106, 239, 0.5); }
+    50%       { box-shadow: 0 0 0 6px rgba(124, 106, 239, 0); }
+}
+
 .tts-btn .tts-icon-on { display: none; }
 .tts-btn.tts-active .tts-icon-off { display: none; }
 .tts-btn.tts-active .tts-icon-on { display: block; }
@@ -1810,6 +1830,23 @@ textarea { font-family: var(--font); color: var(--text); }
     background: rgba(255,255,255,0.06);
 }
 .quiz-action-btn.secondary:hover { background: rgba(255,255,255,0.12); }
+
+.quiz-voice-hint { margin-top: 10px; font-size: .76rem; color: var(--accent); opacity: .8; text-align: center; letter-spacing: .02em; }
+.quiz-voice-hint strong { color: var(--accent); }
+
+/* ── Practice PDFs ───────────────────────────────────────────────────────── */
+.practice-files-wrap { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.practice-files-label { font-size: .75rem; color: var(--accent); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.practice-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 12px; transition: border-color var(--transition); }
+.practice-card:hover { border-color: var(--glass-border-glow); }
+.practice-card-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.practice-card-name { font-size: .88rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.practice-card-meta { font-size: .74rem; color: var(--text-dim); }
+.practice-card-btns { display: flex; gap: 8px; flex-shrink: 0; }
+.practice-open-btn { padding: 8px 14px; border-radius: 9px; background: rgba(255,255,255,.06); border: 1px solid var(--glass-border); color: var(--text-dim); font-size: .82rem; cursor: pointer; text-decoration: none; transition: background .2s, color .2s; white-space: nowrap; }
+.practice-open-btn:hover { background: rgba(255,255,255,.12); color: var(--text); }
+.practice-download-btn { padding: 8px 14px; border-radius: 9px; background: rgba(124,106,239,.15); border: 1px solid var(--accent); color: var(--accent); font-size: .82rem; cursor: pointer; text-decoration: none; transition: background .2s; white-space: nowrap; }
+.practice-download-btn:hover { background: var(--accent); color: #fff; }
 
 /* ── Classroom Attention AI ──────────────────────────────────────────────── */
 .classroom-btn.active { color: var(--accent); }

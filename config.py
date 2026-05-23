@@ -20,6 +20,11 @@ VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
 CAMERA_CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+PRACTICE_PDFS_DIR = BASE_DIR / "database" / "practice_pdfs"
+PRACTICE_CLASSES = ["UKG"] + [f"class_{i}" for i in range(1, 13)]
+for _cls in PRACTICE_CLASSES:
+    (PRACTICE_PDFS_DIR / _cls).mkdir(parents=True, exist_ok=True)
+
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
 
 # AWS S3 (Feature 3)

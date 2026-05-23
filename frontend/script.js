@@ -10,7 +10,7 @@ let camStream = null;
 let autoListenMode = false;
 const SPEECH_ERROR_MAX_RETRIES = 3;
 let speechErrorRetryCount = 0;
-const SPEECH_SEND_DELAY_MS = 800;
+const SPEECH_SEND_DELAY_MS = 1800;
 const SPEECH_RESTART_DELAY_MS = 700;
 let speechSendTimeout = null;
 let pendingSendTranscript = null;
@@ -20,10 +20,15 @@ let pendingAttachment = null; // { upload_id, filename, content_type, extracted_
 let _attachmentInFlight = false; // true while processing a message that included an upload
 let pendingYouTube = null;   // { video_id, url }
 let currentQuiz = null;      // { questions[], currentIdx, score, contentEl }
+let voiceQuizMode = false;   // true while quiz is active — intercepts A/B/C/D voice answers
+let _quizListening = false;  // prevents double mic-open per question
+let wakeWordMode = false;    // mic always on, activates only on "Jarvis"
+let _wakeActive = false;     // "Jarvis" heard, 10-second command window is open
+let _wakeTimeout = null;     // auto-deactivates after 10s of silence
 let recognition = null;
 let ttsPlayer = null;
 const SETTINGS_KEY = 'jarvis_settings';
-const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true };
+const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true, wakeWordMode: false };
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
 let PRE_STARTER_CACHE = {};
 let settings = { ...DEFAULT_SETTINGS };
@@ -70,6 +75,7 @@ const toggleAutoActivity  = $('toggle-auto-activity');
 const toggleAutoSearch    = $('toggle-auto-search');
 const toggleThinkingSounds = $('toggle-thinking-sounds');
 const toggleVoiceInterrupt = $('toggle-voice-interrupt');
+const toggleWakeWord       = $('toggle-wake-word');
 const toastContainer     = $('toast-container');
 const uploadBtn          = $('upload-btn');
 const uploadInput        = $('upload-input');
@@ -377,6 +383,7 @@ function init() {
     autoResizeInput();
     _initAuthUI();
     _initAuth();
+    _maybeStartWakeWord();
 }
 
 function _initAuthUI() {
@@ -415,6 +422,8 @@ function loadSettings() {
         if (toggleAutoSearch) toggleAutoSearch.checked = settings.autoOpenSearchResults;
         if (toggleThinkingSounds) toggleThinkingSounds.checked = settings.thinkingSounds;
         if (toggleVoiceInterrupt) toggleVoiceInterrupt.checked = settings.voiceInterrupt;
+        if (toggleWakeWord) toggleWakeWord.checked = settings.wakeWordMode;
+        if (settings.wakeWordMode) { wakeWordMode = true; if (micBtn) micBtn.classList.add('wake-word-mode'); }
     } catch (_) {}
 }
 
@@ -460,12 +469,17 @@ function initSpeech() {
     const safariMode = isSafariOrIOS();
     recognition.continuous = false;
     recognition.interimResults = !safariMode;
-    recognition.maxAlternatives = 1;
-    recognition.lang = 'en-US';
+    recognition.maxAlternatives = 3;
+    recognition.lang = 'en-IN';
     recognition.onresult = e => {
         if (!e.results || e.results.length === 0) return;
         const last = e.results[e.results.length - 1];
-        const transcript = (last && last[0]) ? last[0].transcript.trim() : '';
+        // Pick the best alternative — combine all to get longest/most-complete transcript
+        let transcript = '';
+        for (let i = 0; i < (last ? last.length : 0); i++) {
+            const alt = last[i] ? last[i].transcript.trim() : '';
+            if (alt.length > transcript.length) transcript = alt;
+        }
         const isFinal = last && last.isFinal;
         if (speechWidgetText) speechWidgetText.textContent = transcript;
         if (speechWidget) speechWidget.classList.add('visible');
@@ -474,6 +488,37 @@ function initSpeech() {
             ttsPlayer.stopped = false;
         }
         if (isFinal && transcript) {
+            // === WAKE WORD INTERCEPTION ===
+            // When wake word mode is ON, the mic always runs in the background.
+            // Only process commands after the user says "Jarvis".
+            if (wakeWordMode) {
+                const hasJarvis = /\bjarvis\b/i.test(transcript);
+                if (!_wakeActive) {
+                    if (!hasJarvis) return; // Background noise — ignore
+                    const afterJarvis = transcript.replace(/^.*?\bjarvis[,.]?\s*/i, '').trim();
+                    if (afterJarvis.length > 1) {
+                        // "Jarvis <command>" in one utterance — strip wake word and fall through
+                        transcript = afterJarvis;
+                    } else {
+                        // Just "Jarvis" alone — open 10-second command window
+                        _wakeActive = true;
+                        clearTimeout(_wakeTimeout);
+                        _wakeTimeout = setTimeout(() => {
+                            _wakeActive = false;
+                            if (micBtn) micBtn.classList.remove('wake-active');
+                        }, 10000);
+                        if (micBtn) micBtn.classList.add('wake-active');
+                        speakText('Yes, Sir?');
+                        return;
+                    }
+                } else {
+                    // Window was open — this utterance is the command
+                    clearTimeout(_wakeTimeout);
+                    _wakeActive = false;
+                    if (micBtn) micBtn.classList.remove('wake-active');
+                    // Fall through with full transcript as the command
+                }
+            }
             // Intercept voice control commands — handle locally, never send to backend
             if (VOICE_STOP_COMMANDS.test(transcript)) {
                 if (ttsPlayer) { ttsPlayer.stop(); ttsPlayer.stopped = false; }
@@ -483,6 +528,53 @@ function initSpeech() {
                 if (speechWidget) speechWidget.classList.remove('visible');
                 if (speechWidgetText) speechWidgetText.textContent = '';
                 stopListening();
+                return;
+            }
+            // Voice quiz interception — quiz mode captures ALL voice; nothing reaches backend
+            if (currentQuiz && voiceQuizMode) {
+                const norm = transcript.toLowerCase().trim().replace(/[.,!?;:'"]+/g, ' ').replace(/\s+/g, ' ').trim();
+                let chosenIdx = VOICE_QUIZ_ANSWERS[norm];
+                // Fallback 1: "option A/B/C/D" or phrase ending with a letter
+                if (chosenIdx === undefined) {
+                    const lm = norm.match(/\boption\s+([abcd])\b/) || norm.match(/\b([abcd])\b\s*$/);
+                    if (lm) chosenIdx = 'abcd'.indexOf(lm[1]);
+                }
+                // Fallback 2: "option one/two/three/four"
+                if (chosenIdx === undefined) {
+                    const wm = norm.match(/\boption\s+(one|two|three|four)\b/);
+                    if (wm) chosenIdx = { one: 0, two: 1, three: 2, four: 3 }[wm[1]];
+                }
+                // Fallback 3: ordinals or trailing number words
+                if (chosenIdx === undefined) {
+                    const om = norm.match(/\b(first|one|second|two|third|three|fourth|four)\b/);
+                    if (om) chosenIdx = { first: 0, one: 0, second: 1, two: 1, third: 2, three: 2, fourth: 3, four: 3 }[om[1]];
+                }
+                // Always stop and handle in quiz mode — NEVER fall through to backend
+                stopListening();
+                _quizListening = false;
+                clearTimeout(speechSendTimeout);
+                speechSendTimeout = null;
+                if (speechWidget) speechWidget.classList.remove('visible');
+                if (speechWidgetText) speechWidgetText.textContent = '';
+                if (chosenIdx !== undefined) {
+                    const cards = document.querySelectorAll('.quiz-card');
+                    const card = cards[cards.length - 1];
+                    const q = currentQuiz.questions[currentQuiz.currentIdx];
+                    if (card && q) {
+                        const btns = card.querySelectorAll('.quiz-opt-btn');
+                        if (btns[chosenIdx] && !btns[chosenIdx].disabled) {
+                            submitAnswer(card, q, chosenIdx);
+                        }
+                    }
+                } else {
+                    // Didn't understand — ask again without going to backend
+                    speakText('Please say A, B, C, or D to choose your answer.').then(() => {
+                        if (voiceQuizMode && currentQuiz && !_quizListening) {
+                            _quizListening = true;
+                            setTimeout(() => { if (voiceQuizMode && currentQuiz && !isListening) startListening(); }, 300);
+                        }
+                    });
+                }
                 return;
             }
             // Ignore noise/very-short transcripts (ambient sound, breath, etc.)
@@ -510,7 +602,16 @@ function initSpeech() {
         // "no-speech" is completely normal — user was quiet. Restart silently without counting retries.
         if (msg === 'no-speech') {
             stopListening();
-            if (autoListenMode && !isStreaming) {
+            _quizListening = false;
+            if (voiceQuizMode && currentQuiz && !isStreaming) {
+                // Quiz is still waiting — re-open mic so user can answer
+                setTimeout(() => {
+                    if (voiceQuizMode && currentQuiz && !isListening) {
+                        _quizListening = true;
+                        startListening();
+                    }
+                }, SPEECH_RESTART_DELAY_MS);
+            } else if ((wakeWordMode || autoListenMode) && !isStreaming) {
                 setTimeout(() => maybeRestartListening(), SPEECH_RESTART_DELAY_MS);
             }
             return;
@@ -521,7 +622,7 @@ function initSpeech() {
             micBtn.title = 'Microphone access denied. Allow in browser settings.';
             speechErrorRetryCount = SPEECH_ERROR_MAX_RETRIES;
         }
-        if (autoListenMode && !isStreaming && speechErrorRetryCount < SPEECH_ERROR_MAX_RETRIES) {
+        if ((wakeWordMode || autoListenMode) && !isStreaming && speechErrorRetryCount < SPEECH_ERROR_MAX_RETRIES) {
             speechErrorRetryCount++;
             setTimeout(() => maybeRestartListening(), SPEECH_RESTART_DELAY_MS);
         } else if (speechErrorRetryCount >= SPEECH_ERROR_MAX_RETRIES && micBtn) {
@@ -582,15 +683,16 @@ function stopListening() {
 }
 
 function maybeRestartListening() {
-    if (!autoListenMode || !recognition) return;
+    if (!recognition) return;
     if (isStreaming) return;
     // Never restart while TTS is playing — mic would capture Jarvis's own voice.
     // ttsPlayer.onPlaybackComplete is already wired to this function, so it will
     // fire again automatically once TTS finishes.
     const ttsActive = ttsPlayer && (ttsPlayer.playing || ttsPlayer.queue.length > 0);
     if (ttsActive) return;
+    if (!wakeWordMode && !autoListenMode) return;
     setTimeout(() => {
-        if (autoListenMode && !isStreaming && !isListening && recognition) {
+        if ((wakeWordMode || autoListenMode) && !isStreaming && !isListening && recognition) {
             startListening();
         }
     }, SPEECH_RESTART_DELAY_MS);
@@ -609,6 +711,22 @@ const CAMERA_QUERY_PATTERNS = [
 
 // Voice control commands that should be handled locally, never sent to the backend
 const VOICE_STOP_COMMANDS = /^(stop|stop jarvis|stop it|quiet|be quiet|cancel|never mind|nevermind|silence|enough|stop talking|stop speaking|ok stop|okay stop|that'?s enough|shut up|pause)\.?[!.?]?$/i;
+
+// Maps spoken words → option index (0=A, 1=B, 2=C, 3=D)
+const VOICE_QUIZ_ANSWERS = {
+    'a': 0, 'option a': 0, 'answer a': 0, 'choose a': 0, 'select a': 0, 'jarvis a': 0,
+    'jarvis option a': 0, 'pick a': 0, 'go with a': 0, 'i pick a': 0, 'i choose a': 0,
+    'b': 1, 'option b': 1, 'answer b': 1, 'choose b': 1, 'select b': 1, 'jarvis b': 1,
+    'jarvis option b': 1, 'pick b': 1, 'go with b': 1, 'i pick b': 1, 'i choose b': 1,
+    'c': 2, 'option c': 2, 'answer c': 2, 'choose c': 2, 'select c': 2, 'jarvis c': 2,
+    'jarvis option c': 2, 'pick c': 2, 'go with c': 2, 'i pick c': 2, 'i choose c': 2,
+    'd': 3, 'option d': 3, 'answer d': 3, 'choose d': 3, 'select d': 3, 'jarvis d': 3,
+    'jarvis option d': 3, 'pick d': 3, 'go with d': 3, 'i pick d': 3, 'i choose d': 3,
+    'first': 0, 'option one': 0, 'option 1': 0, 'one': 0,
+    'second': 1, 'option two': 1, 'option 2': 1, 'two': 1,
+    'third': 2, 'option three': 2, 'option 3': 2, 'three': 2,
+    'fourth': 3, 'option four': 3, 'option 4': 3, 'four': 3,
+};
 
 function isCameraQuery(text) {
     if (!text || typeof text !== 'string') return false;
@@ -1095,6 +1213,22 @@ function bindEvents() {
     });
     initCameraPanel();
     if (micBtn) micBtn.addEventListener('click', () => {
+        if (wakeWordMode) {
+            // Clicking mic while wake word mode is ON → turn it off
+            wakeWordMode = false;
+            _wakeActive = false;
+            clearTimeout(_wakeTimeout);
+            micBtn.classList.remove('wake-word-mode', 'wake-active');
+            if (toggleWakeWord) toggleWakeWord.checked = false;
+            settings.wakeWordMode = false;
+            saveSettings();
+            stopListening();
+            autoListenMode = false;
+            micBtn.classList.remove('auto-listen');
+            micBtn.title = 'Voice input — click to start listening';
+            showToast('Wake word mode disabled.');
+            return;
+        }
         if (isListening) {
             autoListenMode = false;
             stopListening();
@@ -1171,6 +1305,42 @@ function bindEvents() {
             saveSettings();
         });
     }
+    if (toggleWakeWord) {
+        toggleWakeWord.addEventListener('change', () => {
+            wakeWordMode = toggleWakeWord.checked;
+            settings.wakeWordMode = wakeWordMode;
+            saveSettings();
+            _wakeActive = false;
+            clearTimeout(_wakeTimeout);
+            if (wakeWordMode) {
+                autoListenMode = false;
+                stopListening();
+                if (micBtn) {
+                    micBtn.classList.remove('auto-listen', 'listening');
+                    micBtn.classList.add('wake-word-mode');
+                    micBtn.title = 'Wake word ON — say "Jarvis" to activate. Click mic to disable.';
+                }
+                speechErrorRetryCount = 0;
+                startListening();
+                showToast('Wake word mode ON. Say "Jarvis" to activate.');
+            } else {
+                if (micBtn) {
+                    micBtn.classList.remove('wake-word-mode', 'wake-active');
+                    micBtn.title = 'Voice input — click to start listening';
+                }
+                stopListening();
+                showToast('Wake word mode OFF.');
+            }
+        });
+    }
+}
+
+// Auto-start wake word listening if it was saved as enabled
+function _maybeStartWakeWord() {
+    if (wakeWordMode && recognition && !isListening) {
+        speechErrorRetryCount = 0;
+        startListening();
+    }
 }
 
 function autoResizeInput() {
@@ -1198,6 +1368,8 @@ function newChat() {
     if (camStream) stopCamera();
     clearAttachment();
     sessionId = null;
+    pendingYouTube = null;
+    currentQuiz = null;
     if (chatMessages) chatMessages.innerHTML = '';
     chatMessages.appendChild(createWelcome());
     messageInput.value = '';
@@ -1627,6 +1799,9 @@ async function sendMessage(textOverride) {
                     if (data.interactive_choice && data.interactive_choice.type === 'youtube_analysis') {
                         renderYouTubeChoiceButtons(data.interactive_choice.video_id, contentEl);
                     }
+                    if (data.practice_files) {
+                        renderPracticeFiles(data.practice_files, contentEl);
+                    }
                     if ('chunk' in data) {
                         const chunkText = data.chunk || '';
                         if (chunkText && !firstChunkReceived) {
@@ -1718,6 +1893,54 @@ function renderYouTubeChoiceButtons(videoId, contentEl) {
     });
 }
 
+function renderPracticeFiles(payload, contentEl) {
+    const target = contentEl || Array.from(
+        document.querySelectorAll('.message.assistant .msg-content')
+    ).pop();
+    if (!target || !payload?.files?.length) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'practice-files-wrap';
+    const label = document.createElement('div');
+    label.className = 'practice-files-label';
+    label.textContent = `${payload.class_name.replace('_', ' ').toUpperCase()} — ${payload.files.length} file(s)`;
+    wrap.appendChild(label);
+    for (const file of payload.files) {
+        const card = document.createElement('div');
+        card.className = 'practice-card';
+        const info = document.createElement('div');
+        info.className = 'practice-card-info';
+        const name = document.createElement('div');
+        name.className = 'practice-card-name';
+        name.textContent = file.filename;
+        const meta = document.createElement('div');
+        meta.className = 'practice-card-meta';
+        meta.textContent = `${file.class_name.replace('_', ' ').toUpperCase()} · ${file.size_label}`;
+        info.appendChild(name);
+        info.appendChild(meta);
+        const btnWrap = document.createElement('div');
+        btnWrap.className = 'practice-card-btns';
+        const openBtn = document.createElement('a');
+        openBtn.className = 'practice-open-btn';
+        openBtn.href = `${API}${file.download_url}?inline=true`;
+        openBtn.target = '_blank';
+        openBtn.rel = 'noopener';
+        openBtn.textContent = '⎋ Open';
+        const dlBtn = document.createElement('a');
+        dlBtn.className = 'practice-download-btn';
+        dlBtn.href = `${API}${file.download_url}`;
+        dlBtn.download = file.filename;
+        dlBtn.target = '_blank';
+        dlBtn.textContent = '⬇ Download';
+        btnWrap.appendChild(openBtn);
+        btnWrap.appendChild(dlBtn);
+        card.appendChild(info);
+        card.appendChild(btnWrap);
+        wrap.appendChild(card);
+    }
+    target.appendChild(wrap);
+    scrollToBottom();
+}
+
 let _quizAudio = null;
 async function speakText(text) {
     if (!ttsPlayer || !ttsPlayer.enabled || !text) return;
@@ -1758,6 +1981,8 @@ async function startQuiz(videoId) {
         const data = await res.json();
         if (loadingEl && loadingEl.closest('.message')) loadingEl.closest('.message').remove();
         currentQuiz = { questions: data.questions, currentIdx: 0, score: 0 };
+        voiceQuizMode = true;
+        _quizListening = false;
         renderQuestion(0);
     } catch (e) {
         if (loadingEl) loadingEl.textContent = `Sorry Sir, quiz generation failed: ${e.message}`;
@@ -1776,7 +2001,8 @@ function renderQuestion(idx) {
     card.innerHTML = `
         <div class="quiz-progress">Q ${idx + 1} / ${total} &nbsp;&bull;&nbsp; Score: ${currentQuiz.score}</div>
         <div class="quiz-question">${escapeHtml(q.question)}</div>
-        <div class="quiz-options"></div>`;
+        <div class="quiz-options"></div>
+        <div class="quiz-voice-hint">&#127908; Say <strong>A</strong>, <strong>B</strong>, <strong>C</strong>, or <strong>D</strong> to answer</div>`;
     const optWrap = card.querySelector('.quiz-options');
     q.options.forEach((opt, i) => {
         const btn = document.createElement('button');
@@ -1796,10 +2022,18 @@ function renderQuestion(idx) {
     chatMessages.appendChild(wrapper);
     scrollToBottom();
     const optLabels = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o}`).join('. ');
-    speakText(`Question ${idx + 1} of ${total}. ${q.question}. ${optLabels}.`);
+    speakText(`Question ${idx + 1} of ${total}. ${q.question}. ${optLabels}.`).then(() => {
+        if (voiceQuizMode && currentQuiz && !_quizListening) {
+            _quizListening = true;
+            setTimeout(() => {
+                if (voiceQuizMode && currentQuiz && !isListening) startListening();
+            }, 300);
+        }
+    });
 }
 
 async function submitAnswer(card, q, chosenIdx) {
+    _quizListening = false;
     const btns = card.querySelectorAll('.quiz-opt-btn');
     btns.forEach(b => b.disabled = true);
     const correct = q.correct;
@@ -1987,6 +2221,9 @@ function renderClassroomData(data) {
 
 function renderQuizResult() {
     if (!currentQuiz) return;
+    voiceQuizMode = false;
+    _quizListening = false;
+    stopListening();
     const score = currentQuiz.score;
     const total = currentQuiz.questions.length;
     const pct = Math.round((score / total) * 100);
@@ -2021,6 +2258,8 @@ function renderQuizResult() {
         renderQuestion(0);
     });
     card.querySelector('#quiz-done-btn').addEventListener('click', () => {
+        voiceQuizMode = false;
+        _quizListening = false;
         currentQuiz = null;
         addMessage('assistant', 'Great effort, Sir! Let me know if you have any questions about the video.');
     });

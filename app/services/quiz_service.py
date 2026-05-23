@@ -19,7 +19,12 @@ _YT_REGEX = re.compile(
 )
 
 _DONE_PATTERN = re.compile(
-    r'\b(done|ready|finished|watched|completed|ok|okay|back|i watched|all done)\b',
+    r'\b(done|ready|finished|watched|completed|ok|okay|back|'
+    r'i watched|all done|i\'m done|i am done|jarvis done|done jarvis|'
+    r'seen it|watched it|i finished|video done|video finished|'
+    r'yes done|yeah done|complete|i\'m ready|i am ready|'
+    r'lets go|let\'s go|yes jarvis|ok jarvis|okay jarvis|'
+    r'i\'ve watched|i have watched|i\'ve seen|i have seen)\b',
     re.IGNORECASE,
 )
 

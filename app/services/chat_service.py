@@ -366,7 +366,7 @@ class ChatService:
             threading.Thread(target=_fetch_bg, daemon=True).start()
 
             yield {"_youtube_detected": {"video_id": _video_id, "url": _full_url}}
-            _yt_resp = "I've opened the video for you, Sir. Watch the full video and come back when you're done — I'll analyse it for you."
+            _yt_resp = "I've opened the video for you, Sir. Watch the full video and come back when you're done — I'll generate MCQs, a summary, or answer any questions you have about it."
             self.sessions[session_id][-1].content = _yt_resp
             yield _yt_resp
             self.save_chat_session(session_id)
@@ -415,6 +415,34 @@ class ChatService:
             self.save_chat_session(session_id)
             return
 
+        # --- Practice PDF detection (pre-brain shortcut) ---
+        import re as _re
+        from app.services.practice_service import extract_class_from_message, list_pdfs_for_class
+        _awaiting_class = self.get_session_metadata(session_id, "_practice_awaiting_class")
+        _is_practice_msg = bool(_re.search(r'\b(practice|worksheet|exercises|study material|study sheet)\b', user_message or "", _re.IGNORECASE))
+        if _is_practice_msg or _awaiting_class:
+            _cls = extract_class_from_message(user_message)
+            if _cls is None:
+                # Still couldn't extract class — keep waiting and ask again
+                self.set_session_metadata(session_id, "_practice_awaiting_class", True)
+                if _awaiting_class:
+                    _resp = "Sorry Sir, I didn't catch the class name. Please say something like 'class 5' or 'class two'."
+                else:
+                    _resp = "Sure, Sir! Which class would you like practice materials for? I have materials for UKG through Class 12."
+            else:
+                # Class found — clear waiting flag and show PDFs
+                self.clear_session_metadata(session_id, "_practice_awaiting_class")
+                _pdfs = list_pdfs_for_class(_cls)
+                if not _pdfs:
+                    _resp = f"Sir, no practice materials are uploaded for {_cls.replace('_', ' ').title()} yet."
+                else:
+                    yield {"_practice_files": {"class_name": _cls, "files": _pdfs}}
+                    _resp = f"Here are the practice materials for {_cls.replace('_', ' ').title()}, Sir."
+            self.sessions[session_id][-1].content = _resp
+            yield _resp
+            self.save_chat_session(session_id)
+            return
+
         if imgbase64 and CAMERA_BYPASS_TOKEN in (user_message or ""):
             yield {"_activity": {"event": "decision", "query_type": "camera", "reasoning": "Image attached", "elapsed_ms": 0}}
             yield {"_activity": {"event": "routing", "route": "vision"}}
@@ -452,6 +480,18 @@ class ChatService:
             )
 
         yield {"_activity": {"event": "decision", "query_type": category, "reasoning": primary_method.capitalize(), "elapsed_ms": primary_elapsed_ms}}
+
+        # Pre-compute video transcript context — available to all routing paths below
+        _video_ctx_parts = None
+        _ack_yt = self.get_session_metadata(session_id, "pending_youtube")
+        if _ack_yt and _ack_yt.get("status") == "acknowledged" and _ack_yt.get("transcript"):
+            _video_ctx_parts = [
+                "=== VIDEO TRANSCRIPT ===\n"
+                "The user watched a YouTube video this session. Use the transcript below to answer "
+                "their questions accurately. Prioritise transcript content over general knowledge.\n\n"
+                + _ack_yt["transcript"][:12000]
+            ]
+            yield {"_activity": {"event": "context_retrieved", "message": "Video transcript loaded into context"}}
 
         if category == CATEGORY_CAMERA:
             yield {"_activity": {"event": "routing", "route": "camera"}}
@@ -570,7 +610,8 @@ class ChatService:
 
                 try:
                     for chunk in stream_svc.stream_response(
-                        question=user_message, chat_history=chat_history, key_start_index=chat_idx
+                        question=user_message, chat_history=chat_history, key_start_index=chat_idx,
+                        extra_system_parts=_video_ctx_parts,
                     ):
                     
                         if isinstance(chunk, dict):
@@ -638,7 +679,8 @@ class ChatService:
 
         try:
             for chunk in stream_svc.stream_response(
-                question=user_message, chat_history=chat_history, key_start_index=chat_idx
+                question=user_message, chat_history=chat_history, key_start_index=chat_idx,
+                extra_system_parts=_video_ctx_parts,
             ):
 
                 if isinstance(chunk, dict):

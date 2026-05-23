@@ -250,7 +250,13 @@ class RealtimeGroqService(GroqService):
             return ("", None)
 
     
-    def stream_response(self, question: str, chat_history: Optional[List[tuple]] = None, key_start_index: int = 0) -> Iterator[Any]:
+    def stream_response(
+        self,
+        question: str,
+        chat_history: Optional[List[tuple]] = None,
+        key_start_index: int = 0,
+        extra_system_parts: Optional[List[str]] = None,
+    ) -> Iterator[Any]:
         try:
             yield {"_activity": {"event": "extracting_query", "message": "Extracting search query..."}}
             search_query = self._extract_search_query(question, chat_history)
@@ -270,11 +276,12 @@ class RealtimeGroqService(GroqService):
             if payload:
                 yield {"_search_results": payload}
 
-            extra_parts = [escape_curly_braces(formatted_results)] if formatted_results else None
+            _search_parts = [escape_curly_braces(formatted_results)] if formatted_results else []
+            _all_parts = list(extra_system_parts or []) + _search_parts or None
             prompt, messages = self._build_prompt_and_messages(
                 question,
                 chat_history,
-                extra_system_parts=extra_parts,
+                extra_system_parts=_all_parts if _all_parts else None,
                 mode_addendum=REALTIME_CHAT_ADDENDUM,
             )
             yield from self._stream_llm(prompt, messages, question, key_start_index=key_start_index)
@@ -294,14 +301,16 @@ class RealtimeGroqService(GroqService):
         formatted_results: Optional[str] = None,
         payload: Optional[dict] = None,
         key_start_index: int = 0,
+        extra_system_parts: Optional[List[str]] = None,
     ) -> Iterator[Any]:
 
         try:
-            extra_parts = [escape_curly_braces(formatted_results)] if formatted_results else None
+            _search_parts = [escape_curly_braces(formatted_results)] if formatted_results else []
+            _all_parts = list(extra_system_parts or []) + _search_parts or None
             prompt, messages = self._build_prompt_and_messages(
                 question,
                 chat_history,
-                extra_system_parts=extra_parts,
+                extra_system_parts=_all_parts if _all_parts else None,
                 mode_addendum=REALTIME_CHAT_ADDENDUM,
             )
 

@@ -61,3 +61,15 @@ class SummaryResponse(BaseModel):
 
 class ClassroomAnalyseRequest(BaseModel):
     frame_base64: str = Field(..., min_length=1)
+
+class PracticeFile(BaseModel):
+    filename: str
+    class_name: str
+    size_bytes: int
+    size_label: str
+    download_url: str
+
+class PracticeListResponse(BaseModel):
+    class_name: str
+    files: List[PracticeFile]
+    count: int
