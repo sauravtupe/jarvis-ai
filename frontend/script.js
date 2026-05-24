@@ -495,22 +495,28 @@ function initSpeech() {
             if (wakeWordMode) {
                 const hasJarvis = /\bjarvis\b/i.test(transcript);
                 if (!_wakeActive) {
-                    if (!hasJarvis) return; // Background noise — ignore
-                    const afterJarvis = transcript.replace(/^.*?\bjarvis[,.]?\s*/i, '').trim();
-                    if (afterJarvis.length > 1) {
-                        // "Jarvis <command>" in one utterance — strip wake word and fall through
-                        transcript = afterJarvis;
+                    if (!hasJarvis) {
+                        // Quiz mode takes priority — quiz answers bypass the wake word gate
+                        if (!(currentQuiz && voiceQuizMode)) return;
+                        // Quiz is active: skip wake word processing entirely, fall to quiz interceptor
                     } else {
-                        // Just "Jarvis" alone — open 10-second command window
-                        _wakeActive = true;
-                        clearTimeout(_wakeTimeout);
-                        _wakeTimeout = setTimeout(() => {
-                            _wakeActive = false;
-                            if (micBtn) micBtn.classList.remove('wake-active');
-                        }, 10000);
-                        if (micBtn) micBtn.classList.add('wake-active');
-                        speakText('Yes, Sir?');
-                        return;
+                        // "Jarvis" found — handle wake word activation
+                        const afterJarvis = transcript.replace(/^.*?\bjarvis[,.]?\s*/i, '').trim();
+                        if (afterJarvis.length > 1) {
+                            // "Jarvis <command>" in one utterance — strip wake word and fall through
+                            transcript = afterJarvis;
+                        } else {
+                            // Just "Jarvis" alone — open 10-second command window
+                            _wakeActive = true;
+                            clearTimeout(_wakeTimeout);
+                            _wakeTimeout = setTimeout(() => {
+                                _wakeActive = false;
+                                if (micBtn) micBtn.classList.remove('wake-active');
+                            }, 10000);
+                            if (micBtn) micBtn.classList.add('wake-active');
+                            speakText('Yes, Sir?');
+                            return;
+                        }
                     }
                 } else {
                     // Window was open — this utterance is the command
@@ -1668,6 +1674,27 @@ async function sendMessage(textOverride) {
         if (ttsPlayer) { ttsPlayer.stop(); ttsPlayer.stopped = false; }
         if (messageInput) messageInput.value = '';
         return;
+    }
+    // Intercept quiz answers — catches typed input AND voice that bypassed recognition.onresult
+    if (currentQuiz && voiceQuizMode) {
+        const _qn = text.toLowerCase().trim().replace(/[.,!?;:'"]+/g, ' ').replace(/\s+/g, ' ').trim();
+        let _qi = VOICE_QUIZ_ANSWERS[_qn];
+        if (_qi === undefined) {
+            const _ql = _qn.match(/\boption\s+([abcd])\b/) || _qn.match(/\b([abcd])\b\s*$/) || _qn.match(/^([abcd])$/);
+            if (_ql) _qi = 'abcd'.indexOf(_ql[1]);
+        }
+        if (_qi !== undefined) {
+            messageInput.value = '';
+            autoResizeInput();
+            const _qcards = document.querySelectorAll('.quiz-card');
+            const _qcard = _qcards[_qcards.length - 1];
+            const _qq = currentQuiz.questions[currentQuiz.currentIdx];
+            if (_qcard && _qq) {
+                const _qbtns = _qcard.querySelectorAll('.quiz-opt-btn');
+                if (_qbtns[_qi] && !_qbtns[_qi].disabled) submitAnswer(_qcard, _qq, _qi);
+            }
+            return;
+        }
     }
     const visionModeOn = camVisionModeInput && camVisionModeInput.checked;
     const hasAttachment = !!pendingAttachment;

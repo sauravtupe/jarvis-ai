@@ -280,11 +280,20 @@ class TimingMiddleware(BaseHTTPMiddleware):
         t0 = time.perf_counter()
         response = await call_next(request)
         elapsed = time.perf_counter() - t0
-        path = request.url.path
         logger.info("[REQUEST] %s %s -> %s (%.3fs)", request.method, request.url.path, response.status_code, elapsed)
         return response
-    
+
+class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.endswith(('.html', '.js', '.css')):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
 app.add_middleware(TimingMiddleware)
+app.add_middleware(NoCacheStaticMiddleware)
 
 @app.get("/api")
 
