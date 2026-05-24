@@ -221,16 +221,23 @@ let preStarterPlayer = null;
 // Browser speech fallback — speaks fullResponse when backend TTS returns no audio.
 // Uses Web Speech API (built into every modern browser, no server needed).
 function _browserSpeak(text) {
-    if (!text || !window.speechSynthesis || !(ttsPlayer && ttsPlayer.enabled)) return;
+    if (!text || !window.speechSynthesis) return;
+    if (ttsPlayer && !ttsPlayer.enabled) return;
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text.slice(0, 4000));
     utter.lang = 'en-IN';
     utter.rate = 1.1;
+    utter.onerror = e => console.warn('[TTS] speechSynthesis error:', e.error);
     const setVoice = () => {
         const voices = window.speechSynthesis.getVoices();
         const v = voices.find(x => x.lang === 'en-IN') || voices.find(x => x.lang.startsWith('en-IN')) || voices.find(x => x.lang.startsWith('en'));
         if (v) utter.voice = v;
-        window.speechSynthesis.speak(utter);
+        try {
+            window.speechSynthesis.speak(utter);
+            console.log('[TTS] speechSynthesis speaking, voice:', utter.voice ? utter.voice.name : 'default');
+        } catch (e) {
+            console.warn('[TTS] speechSynthesis.speak() threw:', e);
+        }
     };
     if (window.speechSynthesis.getVoices().length > 0) { setVoice(); }
     else { window.speechSynthesis.onvoiceschanged = setVoice; }
@@ -246,6 +253,7 @@ class TTSPlayer {
         this._gainNode = null;
         this._currentSource = null;
         this._ctxUnlocked = false;
+        this._didPlay = false;
     }
     _initCtx() {
         if (this._ctx && this._ctx.state !== 'closed') return;
@@ -297,6 +305,7 @@ class TTSPlayer {
     reset() {
         this.stop();
         this.stopped = false;
+        this._didPlay = false;
         this._loopId = (this._loopId || 0) + 1;
     }
     async _playLoop() {
@@ -348,6 +357,7 @@ class TTSPlayer {
                     resolve();
                 };
                 src.start(0);
+                this._didPlay = true;
             } catch (e) {
                 console.warn('[TTS] Web Audio failed, trying HTML:', e.message);
                 await this._playHTML(b64).catch(() => {});
@@ -366,7 +376,7 @@ class TTSPlayer {
                 const done = () => { try { URL.revokeObjectURL(url); } catch (_) {} resolve(); };
                 audio.onended = done;
                 audio.onerror = () => { console.warn('[TTS] HTML audio error'); done(); };
-                audio.play().catch(e => {
+                audio.play().then(() => { this._didPlay = true; }).catch(e => {
                     console.warn('[TTS] play() blocked:', e.name, '— interact with the page first');
                     done();
                 });
@@ -1159,9 +1169,19 @@ async function sendMessageWithImage(text, imgBase64) {
             if (streamDone) break;
         }
         if (cursorEl) cursorEl.remove();
-        if (_ttsFlag2 && !_ttsGotAudio2 && fullResponse) {
-            console.log('[TTS] backend sent no audio — using browser speechSynthesis fallback');
-            _browserSpeak(fullResponse);
+        if (_ttsFlag2 && fullResponse) {
+            if (!_ttsGotAudio2) {
+                console.log('[TTS] no backend audio — browser speechSynthesis fallback');
+                _browserSpeak(fullResponse);
+            } else {
+                const _savedResp2 = fullResponse;
+                setTimeout(() => {
+                    if (ttsPlayer && !ttsPlayer._didPlay) {
+                        console.log('[TTS] audio not playing after 3s — browser fallback (vision)');
+                        _browserSpeak(_savedResp2);
+                    }
+                }, 3000);
+            }
         }
         const textSpan = contentEl.querySelector('.msg-stream-text');
         if (textSpan && !fullResponse) textSpan.textContent = '(No response)';
@@ -1805,10 +1825,22 @@ async function sendMessage(textOverride) {
             if (streamDone) break;
         }
         if (cursorEl) cursorEl.remove();
-        // Browser TTS fallback — if backend sent no audio, use Web Speech API
-        if (_ttsFlag && !_ttsGotAudio && fullResponse) {
-            console.log('[TTS] backend sent no audio — using browser speechSynthesis fallback');
-            _browserSpeak(fullResponse);
+        // Browser TTS fallback
+        if (_ttsFlag && fullResponse) {
+            if (!_ttsGotAudio) {
+                // Backend sent no audio — use browser TTS immediately
+                console.log('[TTS] no backend audio — browser speechSynthesis fallback');
+                _browserSpeak(fullResponse);
+            } else {
+                // Audio received — give it 3s to start playing; fall back if it never does
+                const _savedResp = fullResponse;
+                setTimeout(() => {
+                    if (ttsPlayer && !ttsPlayer._didPlay) {
+                        console.log('[TTS] audio received but not playing after 3s — browser fallback');
+                        _browserSpeak(_savedResp);
+                    }
+                }, 3000);
+            }
         }
         const textSpan = contentEl.querySelector('.msg-stream-text');
         if (textSpan && !fullResponse) textSpan.textContent = '(No response)';
