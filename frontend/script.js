@@ -218,6 +218,24 @@ class PreStarterPlayer {
 
 let preStarterPlayer = null;
 
+// Browser speech fallback — speaks fullResponse when backend TTS returns no audio.
+// Uses Web Speech API (built into every modern browser, no server needed).
+function _browserSpeak(text) {
+    if (!text || !window.speechSynthesis || !(ttsPlayer && ttsPlayer.enabled)) return;
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text.slice(0, 4000));
+    utter.lang = 'en-IN';
+    utter.rate = 1.1;
+    const setVoice = () => {
+        const voices = window.speechSynthesis.getVoices();
+        const v = voices.find(x => x.lang === 'en-IN') || voices.find(x => x.lang.startsWith('en-IN')) || voices.find(x => x.lang.startsWith('en'));
+        if (v) utter.voice = v;
+        window.speechSynthesis.speak(utter);
+    };
+    if (window.speechSynthesis.getVoices().length > 0) { setVoice(); }
+    else { window.speechSynthesis.onvoiceschanged = setVoice; }
+}
+
 class TTSPlayer {
     constructor() {
         this.queue = [];
@@ -1064,6 +1082,7 @@ async function sendMessageWithImage(text, imgBase64) {
     try {
         timeoutId = setTimeout(() => controller.abort(), 300000);
         const _ttsFlag2 = !!(ttsPlayer && ttsPlayer.enabled);
+        let _ttsGotAudio2 = false;
         console.log('[TTS] sending vision request — tts:', _ttsFlag2, '| player:', !!ttsPlayer, '| enabled:', ttsPlayer?.enabled);
         const res = await fetch(`${API}/chat/jarvis/stream`, {
             method: 'POST',
@@ -1126,6 +1145,7 @@ async function sendMessageWithImage(text, imgBase64) {
                         if (data.audio && ttsPlayer) {
                             console.log('[TTS] audio received, size:', data.audio.length, '| enabled:', ttsPlayer.enabled, '| ctx:', ttsPlayer._ctx ? ttsPlayer._ctx.state : 'null');
                             ttsPlayer.enqueue(data.audio);
+                            _ttsGotAudio2 = true;
                         } else {
                             console.warn('[TTS] audio event arrived but empty — backend TTS likely failed. ttsPlayer:', !!ttsPlayer, 'enabled:', ttsPlayer?.enabled);
                         }
@@ -1139,6 +1159,10 @@ async function sendMessageWithImage(text, imgBase64) {
             if (streamDone) break;
         }
         if (cursorEl) cursorEl.remove();
+        if (_ttsFlag2 && !_ttsGotAudio2 && fullResponse) {
+            console.log('[TTS] backend sent no audio — using browser speechSynthesis fallback');
+            _browserSpeak(fullResponse);
+        }
         const textSpan = contentEl.querySelector('.msg-stream-text');
         if (textSpan && !fullResponse) textSpan.textContent = '(No response)';
     } catch (err) {
@@ -1674,6 +1698,7 @@ async function sendMessage(textOverride) {
         }
         timeoutId = setTimeout(() => controller.abort(), 300000);
         const _ttsFlag = !!(ttsPlayer && ttsPlayer.enabled);
+        let _ttsGotAudio = false;
         console.log('[TTS] sending request — tts:', _ttsFlag, '| player:', !!ttsPlayer, '| enabled:', ttsPlayer?.enabled);
         const res = await fetch(`${API}${endpoint}`, {
             method: 'POST',
@@ -1765,6 +1790,7 @@ async function sendMessage(textOverride) {
                         if (data.audio && ttsPlayer) {
                             console.log('[TTS] audio received, size:', data.audio.length, '| enabled:', ttsPlayer.enabled, '| ctx:', ttsPlayer._ctx ? ttsPlayer._ctx.state : 'null');
                             ttsPlayer.enqueue(data.audio);
+                            _ttsGotAudio = true;
                         } else {
                             console.warn('[TTS] audio event arrived but empty — backend TTS likely failed. ttsPlayer:', !!ttsPlayer, 'enabled:', ttsPlayer?.enabled);
                         }
@@ -1779,6 +1805,11 @@ async function sendMessage(textOverride) {
             if (streamDone) break;
         }
         if (cursorEl) cursorEl.remove();
+        // Browser TTS fallback — if backend sent no audio, use Web Speech API
+        if (_ttsFlag && !_ttsGotAudio && fullResponse) {
+            console.log('[TTS] backend sent no audio — using browser speechSynthesis fallback');
+            _browserSpeak(fullResponse);
+        }
         const textSpan = contentEl.querySelector('.msg-stream-text');
         if (textSpan && !fullResponse) textSpan.textContent = '(No response)';
     } catch (err) {
