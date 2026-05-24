@@ -156,6 +156,21 @@ async def lifespan(app: FastAPI):
 
 
     try:
+        # Generate starter audio clips if missing (handles HuggingFace Docker build cache misses)
+        _audio_dir = Path("frontend/audio")
+        _missing = not (_audio_dir / "starter_1.mp3").exists()
+        if _missing:
+            logger.info("[AUDIO] Starter audio missing — generating now...")
+            try:
+                import asyncio as _asyncio, sys as _sys
+                _sys.path.insert(0, str(Path(__file__).parent.parent))
+                from app.generate_thinking_audio import main as _gen_audio
+                _asyncio.get_event_loop().run_until_complete(_gen_audio())
+                logger.info("[AUDIO] Starter audio generated successfully")
+            except Exception as _e:
+                logger.warning("[AUDIO] Could not generate starter audio: %s", _e)
+        else:
+            logger.info("[AUDIO] Starter audio files present — skipping generation")
 
         logger.info("[STORAGE] Restoring data from S3 (if any)...")
         startup_restore_from_s3()
