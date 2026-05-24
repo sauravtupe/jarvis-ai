@@ -1111,6 +1111,28 @@ async def serve_index():
     html = re.sub(r'\?v=[^"\'&\s]+', f'?v={ts}', html)
     return _HTMLResponse(content=html, media_type="text/html", headers=_NO_CACHE_HEADERS)
 
+_MEDIA_TYPES = {
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+    ".css": "text/css", ".js": "application/javascript",
+    ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml",
+    ".ico": "image/x-icon", ".woff2": "font/woff2", ".woff": "font/woff",
+}
+
+@app.get("/app/{file_path:path}", include_in_schema=False)
+async def serve_static(file_path: str):
+    """Serve any static file under frontend/ — handles audio, CSS, JS, images."""
+    full_path = _frontend_dir / file_path
+    if not full_path.exists() or not full_path.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    suffix = full_path.suffix.lower()
+    media_type = _MEDIA_TYPES.get(suffix, "application/octet-stream")
+    cache = "public, max-age=3600" if suffix in (".mp3", ".wav", ".ogg", ".png", ".jpg", ".ico", ".woff2", ".woff") else "no-cache"
+    return Response(
+        content=full_path.read_bytes(),
+        media_type=media_type,
+        headers={"Cache-Control": cache},
+    )
+
 if _frontend_dir.exists():
     app.mount("/app", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
 

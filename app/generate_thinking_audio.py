@@ -25,23 +25,40 @@ RATE = "+12%"
 async def generate_one(name: str, text: str) -> bool:
     path = AUDIO_DIR / f"{name}.mp3"
 
-    # Try edge-tts with a 10s timeout
+    # Skip if already exists and non-empty
+    if path.exists() and path.stat().st_size > 1000:
+        print(f"  [skip] {name}.mp3 already exists")
+        return True
+
+    # Try edge-tts with a 10s timeout — write to temp file first so existing file is not corrupted on failure
+    tmp = path.with_suffix(".tmp")
     try:
         import edge_tts
         communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
-        await asyncio.wait_for(communicate.save(str(path)), timeout=10)
-        print(f"  [ok] {name}.mp3 (edge-tts)")
-        return True
+        await asyncio.wait_for(communicate.save(str(tmp)), timeout=10)
+        if tmp.exists() and tmp.stat().st_size > 1000:
+            tmp.replace(path)
+            print(f"  [ok] {name}.mp3 (edge-tts)")
+            return True
+        raise RuntimeError("edge-tts produced empty file")
     except Exception as e:
         print(f"  [edge-tts FAIL] {name}.mp3: {e} — trying gTTS...")
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
     # Fallback: gTTS uses plain Google HTTP — works from any server including HuggingFace
     try:
         from gtts import gTTS
+        import io
         tts = gTTS(text=text, lang="en", tld="co.in")
-        tts.save(str(path))
-        print(f"  [ok] {name}.mp3 (gTTS)")
-        return True
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        data = buf.getvalue()
+        if len(data) > 1000:
+            path.write_bytes(data)
+            print(f"  [ok] {name}.mp3 (gTTS)")
+            return True
+        raise RuntimeError("gTTS produced empty audio")
     except Exception as e2:
         print(f"  [FAIL] {name}.mp3: {e2}")
         return False
