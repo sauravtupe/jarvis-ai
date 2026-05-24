@@ -1080,6 +1080,9 @@ _NO_CACHE_HEADERS = {
 
 @app.get("/", include_in_schema=False)
 @app.get("/app", include_in_schema=False)
+async def serve_root():
+    return RedirectResponse(url="/app/", status_code=302)
+
 @app.get("/app/", include_in_schema=False)
 async def serve_index():
     """Serve index.html dynamically — injects live timestamp into CSS/JS URLs so no CDN or browser can ever serve stale assets."""
