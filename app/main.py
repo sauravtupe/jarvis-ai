@@ -456,6 +456,11 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
 
     return asyncio.run(_inner())
 
+def _pick_tts_voice(text: str) -> str:
+    if any('ऀ' <= c <= 'ॿ' for c in text):
+        return 'hi-IN-MadhurNeural'
+    return TTS_VOICE
+
 _tts_pool = ThreadPoolExecutor(max_workers=4)
 
 
@@ -473,7 +478,7 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
         if not text or not text.strip():
             return
 
-        audio_queue.append((_tts_pool.submit(_generate_tts_sync, text, TTS_VOICE, TTS_RATE), text))
+        audio_queue.append((_tts_pool.submit(_generate_tts_sync, text, _pick_tts_voice(text), TTS_RATE), text))
         last_submit_time = time.perf_counter()
 
     def _drain_ready():
@@ -1023,7 +1028,7 @@ async def text_to_speech(request: TTSRequest):
 
     async def generate():
         try:
-            communicate = edge_tts.Communicate(text=text, voice=TTS_VOICE, rate=TTS_RATE)
+            communicate = edge_tts.Communicate(text=text, voice=_pick_tts_voice(text), rate=TTS_RATE)
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
                     yield chunk["data"]

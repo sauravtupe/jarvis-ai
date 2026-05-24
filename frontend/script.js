@@ -8,7 +8,7 @@ let isStreaming = false;
 let isListening = false;
 let camStream = null;
 let autoListenMode = false;
-const SPEECH_ERROR_MAX_RETRIES = 3;
+const SPEECH_ERROR_MAX_RETRIES = 15;
 let speechErrorRetryCount = 0;
 const SPEECH_SEND_DELAY_MS = 1800;
 const SPEECH_RESTART_DELAY_MS = 700;
@@ -474,12 +474,15 @@ function initSpeech() {
     recognition.onresult = e => {
         if (!e.results || e.results.length === 0) return;
         const last = e.results[e.results.length - 1];
-        // Pick the best alternative — combine all to get longest/most-complete transcript
+        // Pick the best alternative — prefer any alt containing "Jarvis", else take longest
         let transcript = '';
+        let _jarvisAlt = '';
         for (let i = 0; i < (last ? last.length : 0); i++) {
             const alt = last[i] ? last[i].transcript.trim() : '';
+            if (!_jarvisAlt && /\b(jarvis|jarves|jarvas)\b/i.test(alt)) _jarvisAlt = alt;
             if (alt.length > transcript.length) transcript = alt;
         }
+        if (_jarvisAlt) transcript = _jarvisAlt;
         const isFinal = last && last.isFinal;
         // Don't show transcript widget in wake word background mode (user hasn't said "Jarvis" yet)
         if (speechWidgetText && (!wakeWordMode || _wakeActive)) speechWidgetText.textContent = transcript;
@@ -493,7 +496,7 @@ function initSpeech() {
             // When wake word mode is ON, the mic always runs in the background.
             // Only process commands after the user says "Jarvis".
             if (wakeWordMode) {
-                const hasJarvis = /\bjarvis\b/i.test(transcript);
+                const hasJarvis = /\b(jarvis|jarves|jarvas|jarbus)\b/i.test(transcript);
                 if (!_wakeActive) {
                     if (!hasJarvis) {
                         // Quiz mode takes priority — quiz answers bypass the wake word gate
@@ -629,9 +632,14 @@ function initSpeech() {
             micBtn.title = 'Microphone access denied. Allow in browser settings.';
             speechErrorRetryCount = SPEECH_ERROR_MAX_RETRIES;
         }
-        if ((wakeWordMode || autoListenMode) && !isStreaming && speechErrorRetryCount < SPEECH_ERROR_MAX_RETRIES) {
-            speechErrorRetryCount++;
-            setTimeout(() => maybeRestartListening(), SPEECH_RESTART_DELAY_MS);
+        if ((wakeWordMode || autoListenMode) && !isStreaming) {
+            if (!isPermissionDenied) {
+                // In always-on modes, never give up — reset counter so mic keeps trying
+                if (speechErrorRetryCount >= SPEECH_ERROR_MAX_RETRIES) speechErrorRetryCount = 0;
+                speechErrorRetryCount++;
+                const delay = Math.min(SPEECH_RESTART_DELAY_MS * speechErrorRetryCount, 5000);
+                setTimeout(() => maybeRestartListening(), delay);
+            }
         } else if (speechErrorRetryCount >= SPEECH_ERROR_MAX_RETRIES && micBtn) {
             micBtn.title = 'Voice input — click to try again';
         }
