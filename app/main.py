@@ -1048,9 +1048,12 @@ _NO_CACHE_HEADERS = {
 @app.get("/app", include_in_schema=False)
 @app.get("/app/", include_in_schema=False)
 async def serve_index():
-    """Serve index.html with no-cache so browsers always get the latest version."""
-    from fastapi.responses import FileResponse
-    return FileResponse(str(_frontend_dir / "index.html"), headers=_NO_CACHE_HEADERS)
+    """Serve index.html dynamically — injects live timestamp into CSS/JS URLs so no CDN or browser can ever serve stale assets."""
+    from fastapi.responses import Response as _HTMLResponse
+    html = (_frontend_dir / "index.html").read_text(encoding="utf-8")
+    ts = int(time.time())
+    html = re.sub(r'\?v=[^"\'&\s]+', f'?v={ts}', html)
+    return _HTMLResponse(content=html, media_type="text/html", headers=_NO_CACHE_HEADERS)
 
 if _frontend_dir.exists():
     app.mount("/app", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
