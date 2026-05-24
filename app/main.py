@@ -162,10 +162,8 @@ async def lifespan(app: FastAPI):
         if _missing:
             logger.info("[AUDIO] Starter audio missing — generating now...")
             try:
-                import asyncio as _asyncio, sys as _sys
-                _sys.path.insert(0, str(Path(__file__).parent.parent))
                 from app.generate_thinking_audio import main as _gen_audio
-                _asyncio.get_event_loop().run_until_complete(_gen_audio())
+                await _gen_audio()
                 logger.info("[AUDIO] Starter audio generated successfully")
             except Exception as _e:
                 logger.warning("[AUDIO] Could not generate starter audio: %s", _e)

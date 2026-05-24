@@ -141,12 +141,14 @@ async function _initAuth() {
     }
 
     // Init Supabase client using backend-served config
+    let _supabaseConfigured = false;
     try {
         const res = await fetch(`${API}/auth/config`);
         if (res.ok) {
             const cfg = await res.json();
             if (window.supabase && cfg.supabase_url && cfg.supabase_anon_key) {
                 _supabaseClient = window.supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key);
+                _supabaseConfigured = true;
             }
         }
     } catch (e) {
@@ -156,6 +158,9 @@ async function _initAuth() {
     if (_authToken) {
         _hideLoginOverlay();
         _showUserPill(_authToken);
+    } else if (!_supabaseConfigured) {
+        // Supabase not configured — bypass login (uses test-user-001 placeholder until Feature 7)
+        _hideLoginOverlay();
     } else {
         _showLoginOverlay();
     }
