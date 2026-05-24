@@ -307,10 +307,12 @@ class TTSPlayer {
         if (typeof this.onPlaybackComplete === 'function') this.onPlaybackComplete();
     }
     _playB64(b64) {
+        const ctxState = this._ctx ? this._ctx.state : 'none';
         if (this._ctx && this._ctx.state === 'running') {
+            console.log('[TTS] playing via Web Audio, ctx:', ctxState);
             return this._playWebAudio(b64);
         }
-        // ctx not ready — use fresh HTMLAudioElement (works if page has had any user interaction)
+        console.log('[TTS] playing via HTML Audio (ctx:', ctxState, ')');
         return this._playHTML(b64);
     }
     _playWebAudio(b64) {
@@ -1226,9 +1228,13 @@ async function sendMessageWithImage(text, imgBase64) {
                         }
                         scrollToBottom();
                     }
-                    if (data.audio && ttsPlayer) {
-                        console.log('[TTS] audio received, size:', data.audio.length, '| enabled:', ttsPlayer.enabled, '| ctx:', ttsPlayer._ctx ? ttsPlayer._ctx.state : 'null');
-                        ttsPlayer.enqueue(data.audio);
+                    if ('audio' in data) {
+                        if (data.audio && ttsPlayer) {
+                            console.log('[TTS] audio received, size:', data.audio.length, '| enabled:', ttsPlayer.enabled, '| ctx:', ttsPlayer._ctx ? ttsPlayer._ctx.state : 'null');
+                            ttsPlayer.enqueue(data.audio);
+                        } else {
+                            console.warn('[TTS] audio event arrived but empty — backend TTS likely failed. ttsPlayer:', !!ttsPlayer, 'enabled:', ttsPlayer?.enabled);
+                        }
                     }
                     if (data.error) throw new Error(data.error);
                     if (data.done) { streamDone = true; break; }
@@ -1931,9 +1937,13 @@ async function sendMessage(textOverride) {
                         }
                         scrollToBottom();
                     }
-                    if (data.audio && ttsPlayer) {
-                        console.log('[TTS] audio received, size:', data.audio.length, '| enabled:', ttsPlayer.enabled, '| ctx:', ttsPlayer._ctx ? ttsPlayer._ctx.state : 'null');
-                        ttsPlayer.enqueue(data.audio);
+                    if ('audio' in data) {
+                        if (data.audio && ttsPlayer) {
+                            console.log('[TTS] audio received, size:', data.audio.length, '| enabled:', ttsPlayer.enabled, '| ctx:', ttsPlayer._ctx ? ttsPlayer._ctx.state : 'null');
+                            ttsPlayer.enqueue(data.audio);
+                        } else {
+                            console.warn('[TTS] audio event arrived but empty — backend TTS likely failed. ttsPlayer:', !!ttsPlayer, 'enabled:', ttsPlayer?.enabled);
+                        }
                     }
                     if (data.error) throw new Error(data.error);
                     if (data.done) { streamDone = true; break; }
