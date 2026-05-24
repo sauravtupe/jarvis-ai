@@ -428,7 +428,12 @@ def get_transcript(video_id: str) -> str:
         if "25 MB" in err or "too large" in err.lower():
             raise ValueError("This video is too long to transcribe (audio exceeds 25 MB limit).")
         if not SUPADATA_API_KEY:
-            raise ValueError("SUPADATA_KEY_MISSING: Please add SUPADATA_API_KEY to HuggingFace Secrets. Get a free key at supadata.ai")
+            raise ValueError(
+                "This video's transcript could not be fetched. "
+                "To fix: get a free API key from supadata.ai and add it as "
+                "SUPADATA_API_KEY in your .env file (locally) or HuggingFace Secrets (on HF Space). "
+                "Note: SUPADATA is a YouTube transcript service — it is NOT related to Supabase."
+            )
         raise ValueError(f"All transcript methods failed. Last error: {assemblyai_err or err}")
 
 
