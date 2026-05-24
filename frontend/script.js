@@ -467,7 +467,7 @@ function initSpeech() {
     if (!SR) { micBtn.title = 'Speech not supported in this browser'; return; }
     recognition = new SR();
     const safariMode = isSafariOrIOS();
-    recognition.continuous = false;
+    recognition.continuous = true;
     recognition.interimResults = !safariMode;
     recognition.maxAlternatives = 3;
     recognition.lang = 'en-IN';
@@ -481,8 +481,9 @@ function initSpeech() {
             if (alt.length > transcript.length) transcript = alt;
         }
         const isFinal = last && last.isFinal;
-        if (speechWidgetText) speechWidgetText.textContent = transcript;
-        if (speechWidget) speechWidget.classList.add('visible');
+        // Don't show transcript widget in wake word background mode (user hasn't said "Jarvis" yet)
+        if (speechWidgetText && (!wakeWordMode || _wakeActive)) speechWidgetText.textContent = transcript;
+        if (speechWidget && (!wakeWordMode || _wakeActive)) speechWidget.classList.add('visible');
         if (settings.voiceInterrupt && ttsPlayer && ttsPlayer.playing && transcript.length > 0) {
             ttsPlayer.stop();
             ttsPlayer.stopped = false;
@@ -655,8 +656,10 @@ function startListening() {
     pendingSendTranscript = null;
     clearTimeout(speechSendTimeout);
     speechSendTimeout = null;
-    if (micBtn) micBtn.classList.add('listening');
-    if (speechWidget) speechWidget.classList.add('visible');
+    // In wake word background mode, don't show active-listening UI — keep the green glow
+    const _wakeBackground = wakeWordMode && !_wakeActive;
+    if (micBtn && !_wakeBackground) micBtn.classList.add('listening');
+    if (speechWidget && !_wakeBackground) speechWidget.classList.add('visible');
     if (speechWidgetText) speechWidgetText.textContent = '';
     try {
         recognition.start();
@@ -2023,12 +2026,16 @@ function renderQuestion(idx) {
     scrollToBottom();
     const optLabels = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o}`).join('. ');
     speakText(`Question ${idx + 1} of ${total}. ${q.question}. ${optLabels}.`).then(() => {
-        if (voiceQuizMode && currentQuiz && !_quizListening) {
-            _quizListening = true;
-            setTimeout(() => {
-                if (voiceQuizMode && currentQuiz && !isListening) startListening();
-            }, 300);
-        }
+        if (!voiceQuizMode || !currentQuiz || _quizListening) return;
+        _quizListening = true;
+        // Retry until streaming/TTS is done — don't silently fail on first attempt
+        const _tryStartQuizMic = (attempts) => {
+            if (!voiceQuizMode || !currentQuiz) return;
+            if (isListening) return; // already listening (e.g. wake word continuous mode)
+            if (isStreaming && attempts < 15) { setTimeout(() => _tryStartQuizMic(attempts + 1), 400); return; }
+            startListening();
+        };
+        _tryStartQuizMic(0);
     });
 }
 
