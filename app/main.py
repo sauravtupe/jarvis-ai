@@ -1029,13 +1029,22 @@ async def text_to_speech(request: TTSRequest):
 
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 
+_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+@app.get("/", include_in_schema=False)
+@app.get("/app", include_in_schema=False)
+@app.get("/app/", include_in_schema=False)
+async def serve_index():
+    """Serve index.html with no-cache so browsers always get the latest version."""
+    from fastapi.responses import FileResponse
+    return FileResponse(str(_frontend_dir / "index.html"), headers=_NO_CACHE_HEADERS)
+
 if _frontend_dir.exists():
     app.mount("/app", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
-
-
-@app.get("/")
-async def root_redirect():
-    return RedirectResponse(url="/app/", status_code=302)
 
 def run():
     uvicorn.run(
