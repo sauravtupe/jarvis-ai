@@ -20,16 +20,11 @@ let pendingAttachment = null; // { upload_id, filename, content_type, extracted_
 let _attachmentInFlight = false; // true while processing a message that included an upload
 let pendingYouTube = null;   // { video_id, url }
 let currentQuiz = null;      // { questions[], currentIdx, score, contentEl }
-let voiceQuizMode = false;   // true while quiz is active — intercepts A/B/C/D voice answers
-let _quizListening = false;  // prevents double mic-open per question
-let wakeWordMode = false;    // mic always on, activates only on "Jarvis"
-let _wakeActive = false;     // "Jarvis" heard, 10-second command window is open
-let _wakeTimeout = null;     // auto-deactivates after 10s of silence
 let recognition = null;
 let ttsPlayer = null;
 let _speakAudio = null;
 const SETTINGS_KEY = 'jarvis_settings';
-const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true, wakeWordMode: false };
+const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true };
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
 let PRE_STARTER_CACHE = {};
 let settings = { ...DEFAULT_SETTINGS };
@@ -76,7 +71,6 @@ const toggleAutoActivity  = $('toggle-auto-activity');
 const toggleAutoSearch    = $('toggle-auto-search');
 const toggleThinkingSounds = $('toggle-thinking-sounds');
 const toggleVoiceInterrupt = $('toggle-voice-interrupt');
-const toggleWakeWord       = $('toggle-wake-word');
 const toastContainer     = $('toast-container');
 const uploadBtn          = $('upload-btn');
 const uploadInput        = $('upload-input');
@@ -495,8 +489,6 @@ function loadSettings() {
         if (toggleAutoSearch) toggleAutoSearch.checked = settings.autoOpenSearchResults;
         if (toggleThinkingSounds) toggleThinkingSounds.checked = settings.thinkingSounds;
         if (toggleVoiceInterrupt) toggleVoiceInterrupt.checked = settings.voiceInterrupt;
-        if (toggleWakeWord) toggleWakeWord.checked = settings.wakeWordMode;
-        if (settings.wakeWordMode) { wakeWordMode = true; if (micBtn) micBtn.classList.add('wake-word-mode'); }
     } catch (_) {}
 }
 
@@ -547,64 +539,20 @@ function initSpeech() {
     recognition.onresult = e => {
         if (!e.results || e.results.length === 0) return;
         const last = e.results[e.results.length - 1];
-        // Pick the best alternative — prefer any alt containing "Jarvis", else take longest
+        // Pick the longest alternative transcript
         let transcript = '';
-        let _jarvisAlt = '';
         for (let i = 0; i < (last ? last.length : 0); i++) {
             const alt = last[i] ? last[i].transcript.trim() : '';
-            if (!_jarvisAlt && /\b(jarvis|jarves|jarvas)\b/i.test(alt)) _jarvisAlt = alt;
             if (alt.length > transcript.length) transcript = alt;
         }
-        if (_jarvisAlt) transcript = _jarvisAlt;
         const isFinal = last && last.isFinal;
-        // Don't show transcript widget in wake word background mode (user hasn't said "Jarvis" yet)
-        if (speechWidgetText && (!wakeWordMode || _wakeActive)) speechWidgetText.textContent = transcript;
-        if (speechWidget && (!wakeWordMode || _wakeActive)) speechWidget.classList.add('visible');
+        if (speechWidgetText) speechWidgetText.textContent = transcript;
+        if (speechWidget) speechWidget.classList.add('visible');
         if (settings.voiceInterrupt && ttsPlayer && ttsPlayer.playing && transcript.length > 0) {
             ttsPlayer.stop();
             ttsPlayer.stopped = false;
         }
         if (isFinal && transcript) {
-            // === WAKE WORD INTERCEPTION ===
-            // When wake word mode is ON, the mic always runs in the background.
-            // Only process commands after the user says "Jarvis".
-            if (wakeWordMode) {
-                const hasJarvis = /\b(jarvis|jarves|jarvas|jarbus)\b/i.test(transcript);
-                if (!_wakeActive) {
-                    if (!hasJarvis) {
-                        // Quiz mode takes priority — quiz answers bypass the wake word gate
-                        if (!(currentQuiz && voiceQuizMode)) return;
-                        // Quiz is active: skip wake word processing entirely, fall to quiz interceptor
-                    } else {
-                        // "Jarvis" found — handle wake word activation
-                        const afterJarvis = transcript.replace(/^.*?\bjarvis[,.]?\s*/i, '').trim();
-                        if (afterJarvis.length > 1) {
-                            // "Jarvis <command>" in one utterance — strip wake word and fall through
-                            transcript = afterJarvis;
-                        } else {
-                            // Just "Jarvis" alone — open 10-second command window
-                            _wakeActive = true;
-                            clearTimeout(_wakeTimeout);
-                            _wakeTimeout = setTimeout(() => {
-                                _wakeActive = false;
-                                if (micBtn) micBtn.classList.remove('wake-active');
-                            }, 10000);
-                            if (micBtn) micBtn.classList.add('wake-active');
-                            stopListening();
-                            speakText('Yes, Sir?').then(() => {
-                                if (wakeWordMode && !isListening) setTimeout(() => maybeRestartListening(), 300);
-                            });
-                            return;
-                        }
-                    }
-                } else {
-                    // Window was open — this utterance is the command
-                    clearTimeout(_wakeTimeout);
-                    _wakeActive = false;
-                    if (micBtn) micBtn.classList.remove('wake-active');
-                    // Fall through with full transcript as the command
-                }
-            }
             // Intercept voice control commands — handle locally, never send to backend
             if (VOICE_STOP_COMMANDS.test(transcript)) {
                 if (ttsPlayer) { ttsPlayer.stop(); ttsPlayer.stopped = false; }
@@ -614,53 +562,6 @@ function initSpeech() {
                 if (speechWidget) speechWidget.classList.remove('visible');
                 if (speechWidgetText) speechWidgetText.textContent = '';
                 stopListening();
-                return;
-            }
-            // Voice quiz interception — quiz mode captures ALL voice; nothing reaches backend
-            if (currentQuiz && voiceQuizMode) {
-                const norm = transcript.toLowerCase().trim().replace(/[.,!?;:'"]+/g, ' ').replace(/\s+/g, ' ').trim();
-                let chosenIdx = VOICE_QUIZ_ANSWERS[norm];
-                // Fallback 1: "option A/B/C/D" or phrase ending with a letter
-                if (chosenIdx === undefined) {
-                    const lm = norm.match(/\boption\s+([abcd])\b/) || norm.match(/\b([abcd])\b\s*$/);
-                    if (lm) chosenIdx = 'abcd'.indexOf(lm[1]);
-                }
-                // Fallback 2: "option one/two/three/four"
-                if (chosenIdx === undefined) {
-                    const wm = norm.match(/\boption\s+(one|two|three|four)\b/);
-                    if (wm) chosenIdx = { one: 0, two: 1, three: 2, four: 3 }[wm[1]];
-                }
-                // Fallback 3: ordinals or trailing number words
-                if (chosenIdx === undefined) {
-                    const om = norm.match(/\b(first|one|second|two|third|three|fourth|four)\b/);
-                    if (om) chosenIdx = { first: 0, one: 0, second: 1, two: 1, third: 2, three: 2, fourth: 3, four: 3 }[om[1]];
-                }
-                // Always stop and handle in quiz mode — NEVER fall through to backend
-                stopListening();
-                _quizListening = false;
-                clearTimeout(speechSendTimeout);
-                speechSendTimeout = null;
-                if (speechWidget) speechWidget.classList.remove('visible');
-                if (speechWidgetText) speechWidgetText.textContent = '';
-                if (chosenIdx !== undefined) {
-                    const cards = document.querySelectorAll('.quiz-card');
-                    const card = cards[cards.length - 1];
-                    const q = currentQuiz.questions[currentQuiz.currentIdx];
-                    if (card && q) {
-                        const btns = card.querySelectorAll('.quiz-opt-btn');
-                        if (btns[chosenIdx] && !btns[chosenIdx].disabled) {
-                            submitAnswer(card, q, chosenIdx);
-                        }
-                    }
-                } else {
-                    // Didn't understand — ask again without going to backend
-                    speakText('Please say A, B, C, or D to choose your answer.').then(() => {
-                        if (voiceQuizMode && currentQuiz && !_quizListening) {
-                            _quizListening = true;
-                            setTimeout(() => { if (voiceQuizMode && currentQuiz && !isListening) startListening(); }, 300);
-                        }
-                    });
-                }
                 return;
             }
             // Ignore noise/very-short transcripts (ambient sound, breath, etc.)
@@ -688,16 +589,7 @@ function initSpeech() {
         // "no-speech" is completely normal — user was quiet. Restart silently without counting retries.
         if (msg === 'no-speech') {
             stopListening();
-            _quizListening = false;
-            if (voiceQuizMode && currentQuiz && !isStreaming) {
-                // Quiz is still waiting — re-open mic so user can answer
-                setTimeout(() => {
-                    if (voiceQuizMode && currentQuiz && !isListening) {
-                        _quizListening = true;
-                        startListening();
-                    }
-                }, SPEECH_RESTART_DELAY_MS);
-            } else if ((wakeWordMode || autoListenMode) && !isStreaming) {
+            if (autoListenMode && !isStreaming) {
                 setTimeout(() => maybeRestartListening(), SPEECH_RESTART_DELAY_MS);
             }
             return;
@@ -708,14 +600,11 @@ function initSpeech() {
             micBtn.title = 'Microphone access denied. Allow in browser settings.';
             speechErrorRetryCount = SPEECH_ERROR_MAX_RETRIES;
         }
-        if ((wakeWordMode || autoListenMode) && !isStreaming) {
-            if (!isPermissionDenied) {
-                // In always-on modes, never give up — reset counter so mic keeps trying
-                if (speechErrorRetryCount >= SPEECH_ERROR_MAX_RETRIES) speechErrorRetryCount = 0;
-                speechErrorRetryCount++;
-                const delay = Math.min(SPEECH_RESTART_DELAY_MS * speechErrorRetryCount, 5000);
-                setTimeout(() => maybeRestartListening(), delay);
-            }
+        if (autoListenMode && !isStreaming && !isPermissionDenied) {
+            if (speechErrorRetryCount >= SPEECH_ERROR_MAX_RETRIES) speechErrorRetryCount = 0;
+            speechErrorRetryCount++;
+            const delay = Math.min(SPEECH_RESTART_DELAY_MS * speechErrorRetryCount, 5000);
+            setTimeout(() => maybeRestartListening(), delay);
         } else if (speechErrorRetryCount >= SPEECH_ERROR_MAX_RETRIES && micBtn) {
             micBtn.title = 'Voice input — click to try again';
         }
@@ -746,10 +635,8 @@ function startListening() {
     pendingSendTranscript = null;
     clearTimeout(speechSendTimeout);
     speechSendTimeout = null;
-    // In wake word background mode, don't show active-listening UI — keep the green glow
-    const _wakeBackground = wakeWordMode && !_wakeActive;
-    if (micBtn && !_wakeBackground) micBtn.classList.add('listening');
-    if (speechWidget && !_wakeBackground) speechWidget.classList.add('visible');
+    if (micBtn) micBtn.classList.add('listening');
+    if (speechWidget) speechWidget.classList.add('visible');
     if (speechWidgetText) speechWidgetText.textContent = '';
     try {
         recognition.start();
@@ -783,9 +670,9 @@ function maybeRestartListening() {
     // fire again automatically once TTS finishes.
     const ttsActive = ttsPlayer && (ttsPlayer.playing || ttsPlayer.queue.length > 0);
     if (ttsActive) return;
-    if (!wakeWordMode && !autoListenMode) return;
+    if (!autoListenMode) return;
     setTimeout(() => {
-        if ((wakeWordMode || autoListenMode) && !isStreaming && !isListening && recognition) {
+        if (autoListenMode && !isStreaming && !isListening && recognition) {
             startListening();
         }
     }, SPEECH_RESTART_DELAY_MS);
@@ -1315,22 +1202,6 @@ function bindEvents() {
     });
     initCameraPanel();
     if (micBtn) micBtn.addEventListener('click', () => {
-        if (wakeWordMode) {
-            // Clicking mic while wake word mode is ON → turn it off
-            wakeWordMode = false;
-            _wakeActive = false;
-            clearTimeout(_wakeTimeout);
-            micBtn.classList.remove('wake-word-mode', 'wake-active');
-            if (toggleWakeWord) toggleWakeWord.checked = false;
-            settings.wakeWordMode = false;
-            saveSettings();
-            stopListening();
-            autoListenMode = false;
-            micBtn.classList.remove('auto-listen');
-            micBtn.title = 'Voice input — click to start listening';
-            showToast('Wake word mode disabled.');
-            return;
-        }
         if (isListening) {
             autoListenMode = false;
             stopListening();
@@ -1407,43 +1278,8 @@ function bindEvents() {
             saveSettings();
         });
     }
-    if (toggleWakeWord) {
-        toggleWakeWord.addEventListener('change', () => {
-            wakeWordMode = toggleWakeWord.checked;
-            settings.wakeWordMode = wakeWordMode;
-            saveSettings();
-            _wakeActive = false;
-            clearTimeout(_wakeTimeout);
-            if (wakeWordMode) {
-                autoListenMode = false;
-                stopListening();
-                if (micBtn) {
-                    micBtn.classList.remove('auto-listen', 'listening');
-                    micBtn.classList.add('wake-word-mode');
-                    micBtn.title = 'Wake word ON — say "Jarvis" to activate. Click mic to disable.';
-                }
-                speechErrorRetryCount = 0;
-                startListening();
-                showToast('Wake word mode ON. Say "Jarvis" to activate.');
-            } else {
-                if (micBtn) {
-                    micBtn.classList.remove('wake-word-mode', 'wake-active');
-                    micBtn.title = 'Voice input — click to start listening';
-                }
-                stopListening();
-                showToast('Wake word mode OFF.');
-            }
-        });
-    }
 }
 
-// Auto-start wake word listening if it was saved as enabled
-function _maybeStartWakeWord() {
-    if (wakeWordMode && recognition && !isListening) {
-        speechErrorRetryCount = 0;
-        startListening();
-    }
-}
 
 function autoResizeInput() {
     messageInput.style.height = 'auto';
@@ -1768,27 +1604,6 @@ async function sendMessage(textOverride) {
         if (messageInput) messageInput.value = '';
         return;
     }
-    // Intercept quiz answers — catches typed input AND voice that bypassed recognition.onresult
-    if (currentQuiz && voiceQuizMode) {
-        const _qn = text.toLowerCase().trim().replace(/[.,!?;:'"]+/g, ' ').replace(/\s+/g, ' ').trim();
-        let _qi = VOICE_QUIZ_ANSWERS[_qn];
-        if (_qi === undefined) {
-            const _ql = _qn.match(/\boption\s+([abcd])\b/) || _qn.match(/\b([abcd])\b\s*$/) || _qn.match(/^([abcd])$/);
-            if (_ql) _qi = 'abcd'.indexOf(_ql[1]);
-        }
-        if (_qi !== undefined) {
-            messageInput.value = '';
-            autoResizeInput();
-            const _qcards = document.querySelectorAll('.quiz-card');
-            const _qcard = _qcards[_qcards.length - 1];
-            const _qq = currentQuiz.questions[currentQuiz.currentIdx];
-            if (_qcard && _qq) {
-                const _qbtns = _qcard.querySelectorAll('.quiz-opt-btn');
-                if (_qbtns[_qi] && !_qbtns[_qi].disabled) submitAnswer(_qcard, _qq, _qi);
-            }
-            return;
-        }
-    }
     const visionModeOn = camVisionModeInput && camVisionModeInput.checked;
     const hasAttachment = !!pendingAttachment;
     const wantsCamera = !hasAttachment && (visionModeOn || isCameraQuery(text) || (camStream && text));
@@ -2111,8 +1926,6 @@ async function startQuiz(videoId) {
         const data = await res.json();
         if (loadingEl && loadingEl.closest('.message')) loadingEl.closest('.message').remove();
         currentQuiz = { questions: data.questions, currentIdx: 0, score: 0 };
-        voiceQuizMode = true;
-        _quizListening = false;
         renderQuestion(0);
     } catch (e) {
         if (loadingEl) loadingEl.textContent = `Sorry Sir, quiz generation failed: ${e.message}`;
@@ -2132,7 +1945,7 @@ function renderQuestion(idx) {
         <div class="quiz-progress">Q ${idx + 1} / ${total} &nbsp;&bull;&nbsp; Score: ${currentQuiz.score}</div>
         <div class="quiz-question">${escapeHtml(q.question)}</div>
         <div class="quiz-options"></div>
-        <div class="quiz-voice-hint">&#127908; Say <strong>A</strong>, <strong>B</strong>, <strong>C</strong>, or <strong>D</strong> to answer</div>`;
+        `;
     const optWrap = card.querySelector('.quiz-options');
     q.options.forEach((opt, i) => {
         const btn = document.createElement('button');
@@ -2152,18 +1965,7 @@ function renderQuestion(idx) {
     chatMessages.appendChild(wrapper);
     scrollToBottom();
     const optLabels = q.options.map((o, i) => `${String.fromCharCode(65 + i)}: ${o}`).join('. ');
-    speakText(`Question ${idx + 1} of ${total}. ${q.question}. ${optLabels}.`).then(() => {
-        if (!voiceQuizMode || !currentQuiz || _quizListening) return;
-        _quizListening = true;
-        // Retry until streaming/TTS is done — don't silently fail on first attempt
-        const _tryStartQuizMic = (attempts) => {
-            if (!voiceQuizMode || !currentQuiz) return;
-            if (isListening) return; // already listening (e.g. wake word continuous mode)
-            if (isStreaming && attempts < 15) { setTimeout(() => _tryStartQuizMic(attempts + 1), 400); return; }
-            startListening();
-        };
-        _tryStartQuizMic(0);
-    });
+    speakText(`Question ${idx + 1} of ${total}. ${q.question}. ${optLabels}.`);
 }
 
 async function submitAnswer(card, q, chosenIdx) {
