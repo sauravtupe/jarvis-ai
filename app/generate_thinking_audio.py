@@ -1,5 +1,5 @@
 import asyncio
-import sys 
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,43 +23,36 @@ VOICE = "en-IN-PrabhatNeural"
 RATE = "+12%"
 
 async def generate_one(name: str, text: str) -> bool:
-
-    try:
-        import edge_tts
-
-    except ImportError:
-        return False
-    
     path = AUDIO_DIR / f"{name}.mp3"
 
-    try:
-
-        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
-        await communicate.save(str(path))
-        print(f"  [ok] {name}.mp3")
-        return True
-    
-    except Exception as e:
-        print(f"  [FAIL] {name}.mp3 {e}")
-        return False
-    
-async def main():
-
+    # Try edge-tts with a 10s timeout
     try:
         import edge_tts
+        communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
+        await asyncio.wait_for(communicate.save(str(path)), timeout=10)
+        print(f"  [ok] {name}.mp3 (edge-tts)")
+        return True
+    except Exception as e:
+        print(f"  [edge-tts FAIL] {name}.mp3: {e} — trying gTTS...")
 
-    except ImportError:
-        print("edge-tts not installed. Run: pip install edge-tts")
-        return 1
-    
+    # Fallback: gTTS uses plain Google HTTP — works from any server including HuggingFace
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang="en", tld="co.in")
+        tts.save(str(path))
+        print(f"  [ok] {name}.mp3 (gTTS)")
+        return True
+    except Exception as e2:
+        print(f"  [FAIL] {name}.mp3: {e2}")
+        return False
+
+async def main():
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
     for f in AUDIO_DIR.glob("followup_*.mp3"):
-
         try:
             f.unlink()
             print(f" [REMOVED] {f.name}")
-
         except OSError:
             pass
 
@@ -74,7 +67,6 @@ async def main():
     return 0 if success == len(PHRASES) else 1
 
 if __name__ == "__main__":
-
     try:
         exit_code = asyncio.run(main())
     except KeyboardInterrupt:
