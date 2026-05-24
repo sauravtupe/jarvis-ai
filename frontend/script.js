@@ -225,13 +225,10 @@ class TTSPlayer {
         this.playing = false;
         this.enabled = true;
         this.stopped = false;
-        // Web Audio API (primary — works on all browsers including iOS Safari)
         this._ctx = null;
         this._gainNode = null;
         this._currentSource = null;
-        // HTMLAudioElement fallback
-        this.audio = document.createElement('audio');
-        this.audio.preload = 'auto';
+        this._ctxUnlocked = false;
     }
     _initCtx() {
         if (this._ctx && this._ctx.state !== 'closed') return;
@@ -240,35 +237,30 @@ class TTSPlayer {
             this._gainNode = this._ctx.createGain();
             this._gainNode.connect(this._ctx.destination);
         } catch (e) {
-            console.warn('[TTS] AudioContext unavailable:', e.message);
             this._ctx = null;
         }
     }
     unlock() {
-        // Web Audio API: create context + resume from user gesture
+        // Must be called from a user gesture to start/resume AudioContext
         this._initCtx();
-        if (this._ctx) {
-            if (this._ctx.state === 'suspended') {
-                this._ctx.resume().catch(() => {});
-            }
-            // Play 1-sample silent buffer to fully engage audio subsystem
+        if (!this._ctx) return;
+        if (this._ctx.state === 'suspended') {
+            this._ctx.resume().catch(() => {});
+        }
+        if (!this._ctxUnlocked) {
             try {
                 const buf = this._ctx.createBuffer(1, 1, this._ctx.sampleRate);
                 const src = this._ctx.createBufferSource();
                 src.buffer = buf;
                 src.connect(this._ctx.destination);
                 src.start(0);
+                this._ctxUnlocked = true;
             } catch (_) {}
         }
-        // Also unlock HTMLAudioElement fallback
-        const silentWav = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-        this.audio.src = silentWav;
-        const p = this.audio.play();
-        if (p) p.catch(() => {});
     }
     enqueue(base64Audio) {
-        if (!this.enabled) { console.warn('[TTS] enqueue skipped — TTS is disabled (click speaker icon)'); return; }
-        if (this.stopped) { console.warn('[TTS] enqueue skipped — stopped flag set'); return; }
+        if (!this.enabled) return;
+        if (this.stopped) return;
         this.queue.push(base64Audio);
         if (!this.playing) this._playLoop();
     }
@@ -278,9 +270,6 @@ class TTSPlayer {
             try { this._currentSource.stop(0); } catch (_) {}
             this._currentSource = null;
         }
-        this.audio.pause();
-        this.audio.removeAttribute('src');
-        this.audio.load();
         this.queue = [];
         this.playing = false;
         if (ttsBtn) ttsBtn.classList.remove('tts-speaking');
@@ -310,10 +299,7 @@ class TTSPlayer {
                 console.warn('[TTS] segment error:', e);
             }
         }
-        if (myId !== this._loopId) {
-            this.playing = false;
-            return;
-        }
+        if (myId !== this._loopId) { this.playing = false; return; }
         this.playing = false;
         if (ttsBtn) ttsBtn.classList.remove('tts-speaking');
         if (orbContainer) orbContainer.classList.remove('speaking');
@@ -321,37 +307,17 @@ class TTSPlayer {
         if (typeof this.onPlaybackComplete === 'function') this.onPlaybackComplete();
     }
     _playB64(b64) {
-        const ctxState = this._ctx ? this._ctx.state : 'null';
-        console.log('[TTS] _playB64 called | ctx:', ctxState, '| b64 length:', b64.length);
-        // Use Web Audio API if context is available and running
         if (this._ctx && this._ctx.state === 'running') {
             return this._playWebAudio(b64);
         }
-        // Try resuming ctx if suspended, then use Web Audio
-        if (this._ctx && this._ctx.state === 'suspended') {
-            console.warn('[TTS] ctx suspended — attempting resume then Web Audio');
-            return new Promise(async (resolve) => {
-                try { await this._ctx.resume(); } catch (_) {}
-                if (this._ctx.state === 'running') {
-                    try { await this._playWebAudio(b64); } catch (_) {}
-                } else {
-                    try { await this._playHTML(b64); } catch (_) {}
-                }
-                resolve();
-            });
-        }
-        // Fallback to HTMLAudioElement
-        console.warn('[TTS] no ctx — using HTML fallback');
+        // ctx not ready — use fresh HTMLAudioElement (works if page has had any user interaction)
         return this._playHTML(b64);
     }
     _playWebAudio(b64) {
         return new Promise(async (resolve) => {
             if (this.stopped) { resolve(); return; }
             try {
-                const bin = atob(b64);
-                const bytes = new Uint8Array(bin.length);
-                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                // slice() copies the buffer so decodeAudioData can take ownership
+                const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
                 const audioBuf = await this._ctx.decodeAudioData(bytes.buffer.slice(0));
                 if (this.stopped) { resolve(); return; }
                 const src = this._ctx.createBufferSource();
@@ -364,26 +330,27 @@ class TTSPlayer {
                 };
                 src.start(0);
             } catch (e) {
-                console.warn('[TTS] Web Audio failed, using HTML fallback:', e.message);
-                try { await this._playHTML(b64); } catch (_) {}
+                console.warn('[TTS] Web Audio failed, trying HTML:', e.message);
+                await this._playHTML(b64).catch(() => {});
                 resolve();
             }
         });
     }
     _playHTML(b64) {
+        // Creates a fresh Audio element each time — no shared state, no load() trust issues
         return new Promise(resolve => {
             try {
-                const bin = atob(b64);
-                const bytes = new Uint8Array(bin.length);
-                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
                 const blob = new Blob([bytes], { type: 'audio/mpeg' });
                 const url = URL.createObjectURL(blob);
-                this.audio.src = url;
+                const audio = new Audio(url);
                 const done = () => { try { URL.revokeObjectURL(url); } catch (_) {} resolve(); };
-                this.audio.onended = done;
-                this.audio.onerror = (e) => { console.warn('[TTS] HTML audio error:', e.type); done(); };
-                const p = this.audio.play();
-                if (p) p.catch(e => { console.warn('[TTS] HTML play() blocked:', e.name, '— click the page first'); done(); });
+                audio.onended = done;
+                audio.onerror = () => { console.warn('[TTS] HTML audio error'); done(); };
+                audio.play().catch(e => {
+                    console.warn('[TTS] play() blocked:', e.name, '— interact with the page first');
+                    done();
+                });
             } catch (e) {
                 console.warn('[TTS] _playHTML error:', e.message);
                 resolve();
