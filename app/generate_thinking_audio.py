@@ -10,7 +10,7 @@ STARATER_PHRASES = [
     ("starter_2", "Sure, one moment."),
     ("starter_3", "Got it, hold on."),
     ('starter_4', "On it right now."),
-    ('starter_5', "Alright, give me a sec.")
+    ('starter_5', "Alright, give me a sec."),
     ("starter_6", "Right, one moment."),
     ("starter_7", "Okay, hold on."),
     ("starter_8", "One second please."),
@@ -19,8 +19,8 @@ STARATER_PHRASES = [
 ]
 
 PHRASES = STARATER_PHRASES
-VOICE = "en-GB-RyanNeural"
-RATE = "+22%"
+VOICE = "en-IN-PrabhatNeural"
+RATE = "+12%"
 
 async def generate_one(name: str, text: str) -> bool:
 
