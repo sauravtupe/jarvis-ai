@@ -225,25 +225,46 @@ class TTSPlayer {
         this.playing = false;
         this.enabled = true;
         this.stopped = false;
+        // Web Audio API (primary — works on all browsers including iOS Safari)
+        this._ctx = null;
+        this._gainNode = null;
+        this._currentSource = null;
+        // HTMLAudioElement fallback
         this.audio = document.createElement('audio');
         this.audio.preload = 'auto';
     }
+    _initCtx() {
+        if (this._ctx && this._ctx.state !== 'closed') return;
+        try {
+            this._ctx = new (window.AudioContext || window.webkitAudioContext)();
+            this._gainNode = this._ctx.createGain();
+            this._gainNode.connect(this._ctx.destination);
+        } catch (e) {
+            console.warn('[TTS] AudioContext unavailable:', e.message);
+            this._ctx = null;
+        }
+    }
     unlock() {
+        // Web Audio API: create context + resume from user gesture
+        this._initCtx();
+        if (this._ctx) {
+            if (this._ctx.state === 'suspended') {
+                this._ctx.resume().catch(() => {});
+            }
+            // Play 1-sample silent buffer to fully engage audio subsystem
+            try {
+                const buf = this._ctx.createBuffer(1, 1, this._ctx.sampleRate);
+                const src = this._ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(this._ctx.destination);
+                src.start(0);
+            } catch (_) {}
+        }
+        // Also unlock HTMLAudioElement fallback
         const silentWav = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
         this.audio.src = silentWav;
         const p = this.audio.play();
         if (p) p.catch(() => {});
-        try {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            const g = ctx.createGain();
-            g.gain.value = 0;
-            const o = ctx.createOscillator();
-            o.connect(g);
-            g.connect(ctx.destination);
-            o.start(0);
-            o.stop(ctx.currentTime + 0.001);
-            setTimeout(() => ctx.close(), 200);
-        } catch (_) {}
     }
     enqueue(base64Audio) {
         if (!this.enabled || this.stopped) return;
@@ -252,6 +273,10 @@ class TTSPlayer {
     }
     stop() {
         this.stopped = true;
+        if (this._currentSource) {
+            try { this._currentSource.stop(0); } catch (_) {}
+            this._currentSource = null;
+        }
         this.audio.pause();
         this.audio.removeAttribute('src');
         this.audio.load();
@@ -281,7 +306,7 @@ class TTSPlayer {
             try {
                 await this._playB64(b64);
             } catch (e) {
-                console.warn('TTS segment error:', e);
+                console.warn('[TTS] segment error:', e);
             }
         }
         if (myId !== this._loopId) {
@@ -295,13 +320,57 @@ class TTSPlayer {
         if (typeof this.onPlaybackComplete === 'function') this.onPlaybackComplete();
     }
     _playB64(b64) {
+        // Use Web Audio API if context is available and running
+        if (this._ctx && this._ctx.state === 'running') {
+            return this._playWebAudio(b64);
+        }
+        // Fallback to HTMLAudioElement
+        return this._playHTML(b64);
+    }
+    _playWebAudio(b64) {
+        return new Promise(async (resolve) => {
+            if (this.stopped) { resolve(); return; }
+            try {
+                const bin = atob(b64);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                // slice() copies the buffer so decodeAudioData can take ownership
+                const audioBuf = await this._ctx.decodeAudioData(bytes.buffer.slice(0));
+                if (this.stopped) { resolve(); return; }
+                const src = this._ctx.createBufferSource();
+                src.buffer = audioBuf;
+                src.connect(this._gainNode);
+                this._currentSource = src;
+                src.onended = () => {
+                    if (this._currentSource === src) this._currentSource = null;
+                    resolve();
+                };
+                src.start(0);
+            } catch (e) {
+                console.warn('[TTS] Web Audio failed, using HTML fallback:', e.message);
+                try { await this._playHTML(b64); } catch (_) {}
+                resolve();
+            }
+        });
+    }
+    _playHTML(b64) {
         return new Promise(resolve => {
-            this.audio.src = 'data:audio/mp3;base64,' + b64;
-            const done = () => { resolve(); };
-            this.audio.onended = done;
-            this.audio.onerror = done;
-            const p = this.audio.play();
-            if (p) p.catch(done);
+            try {
+                const bin = atob(b64);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const blob = new Blob([bytes], { type: 'audio/mpeg' });
+                const url = URL.createObjectURL(blob);
+                this.audio.src = url;
+                const done = () => { try { URL.revokeObjectURL(url); } catch (_) {} resolve(); };
+                this.audio.onended = done;
+                this.audio.onerror = (e) => { console.warn('[TTS] HTML audio error:', e.type); done(); };
+                const p = this.audio.play();
+                if (p) p.catch(e => { console.warn('[TTS] HTML play() blocked:', e.name, '— click the page first'); done(); });
+            } catch (e) {
+                console.warn('[TTS] _playHTML error:', e.message);
+                resolve();
+            }
         });
     }
 }
@@ -1860,7 +1929,6 @@ async function sendMessage(textOverride) {
                         const chunkText = data.chunk || '';
                         if (chunkText && !firstChunkReceived) {
                             firstChunkReceived = true;
-                            if (ttsPlayer) ttsPlayer.reset();
                         }
                         fullResponse += chunkText;
                         const textSpan = contentEl.querySelector('.msg-stream-text');
