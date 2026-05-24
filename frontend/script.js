@@ -267,7 +267,8 @@ class TTSPlayer {
         if (p) p.catch(() => {});
     }
     enqueue(base64Audio) {
-        if (!this.enabled || this.stopped) return;
+        if (!this.enabled) { console.warn('[TTS] enqueue skipped — TTS is disabled (click speaker icon)'); return; }
+        if (this.stopped) { console.warn('[TTS] enqueue skipped — stopped flag set'); return; }
         this.queue.push(base64Audio);
         if (!this.playing) this._playLoop();
     }
@@ -320,11 +321,27 @@ class TTSPlayer {
         if (typeof this.onPlaybackComplete === 'function') this.onPlaybackComplete();
     }
     _playB64(b64) {
+        const ctxState = this._ctx ? this._ctx.state : 'null';
+        console.log('[TTS] _playB64 called | ctx:', ctxState, '| b64 length:', b64.length);
         // Use Web Audio API if context is available and running
         if (this._ctx && this._ctx.state === 'running') {
             return this._playWebAudio(b64);
         }
+        // Try resuming ctx if suspended, then use Web Audio
+        if (this._ctx && this._ctx.state === 'suspended') {
+            console.warn('[TTS] ctx suspended — attempting resume then Web Audio');
+            return new Promise(async (resolve) => {
+                try { await this._ctx.resume(); } catch (_) {}
+                if (this._ctx.state === 'running') {
+                    try { await this._playWebAudio(b64); } catch (_) {}
+                } else {
+                    try { await this._playHTML(b64); } catch (_) {}
+                }
+                resolve();
+            });
+        }
         // Fallback to HTMLAudioElement
+        console.warn('[TTS] no ctx — using HTML fallback');
         return this._playHTML(b64);
     }
     _playWebAudio(b64) {
@@ -1242,7 +1259,10 @@ async function sendMessageWithImage(text, imgBase64) {
                         }
                         scrollToBottom();
                     }
-                    if (data.audio && ttsPlayer) ttsPlayer.enqueue(data.audio);
+                    if (data.audio && ttsPlayer) {
+                        console.log('[TTS] audio received, size:', data.audio.length, '| enabled:', ttsPlayer.enabled, '| ctx:', ttsPlayer._ctx ? ttsPlayer._ctx.state : 'null');
+                        ttsPlayer.enqueue(data.audio);
+                    }
                     if (data.error) throw new Error(data.error);
                     if (data.done) { streamDone = true; break; }
                 } catch (parseErr) {
@@ -1945,6 +1965,7 @@ async function sendMessage(textOverride) {
                         scrollToBottom();
                     }
                     if (data.audio && ttsPlayer) {
+                        console.log('[TTS] audio received, size:', data.audio.length, '| enabled:', ttsPlayer.enabled, '| ctx:', ttsPlayer._ctx ? ttsPlayer._ctx.state : 'null');
                         ttsPlayer.enqueue(data.audio);
                     }
                     if (data.error) throw new Error(data.error);
