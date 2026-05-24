@@ -627,10 +627,12 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
                 yield f"data: {json.dumps({'audio': b64, 'sentence': sent})}\n\n"
 
             except FuturesTimeoutError:
-                logger.warning("[TTS-INLINE] Timeout for '%s' (15s)", (sent or "")[:40])
+                logger.error("[TTS-INLINE] Timeout for '%s' (15s) — edge-tts may be slow or blocked", (sent or "")[:40])
+                yield f"data: {json.dumps({'audio': '', 'sentence': sent or ''})}\n\n"
 
             except Exception as exc:
-                logger.warning("[TTS-INLINE] Failed for '%s': %s", (sent or "")[:40], exc)
+                logger.error("[TTS-INLINE] Failed for '%s': %s", (sent or "")[:40], exc)
+                yield f"data: {json.dumps({'audio': '', 'sentence': sent or ''})}\n\n"
 
     yield f"data: {json.dumps({'chunk': '', 'done': True, 'session_id': session_id})}\n\n"
 
