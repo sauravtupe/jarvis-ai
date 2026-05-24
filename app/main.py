@@ -968,7 +968,7 @@ async def generate_quiz(request: QuizGenerateRequest, user_id: str = Depends(get
         raise HTTPException(status_code=503, detail="Groq API key not configured")
 
     try:
-        questions_raw = quiz_service.generate_mcqs(transcript, GROQ_API_KEYS[0])
+        questions_raw = quiz_service.generate_mcqs(transcript, GROQ_API_KEYS)
     except Exception as e:
         logger.error("[QUIZ] MCQ generation failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Quiz generation failed: {e}")
@@ -1015,7 +1015,7 @@ async def generate_summary(request: SummaryRequest):
         raise HTTPException(status_code=503, detail="Groq API key not configured")
 
     try:
-        summary_text = quiz_service.generate_summary(transcript, GROQ_API_KEYS[0])
+        summary_text = quiz_service.generate_summary(transcript, GROQ_API_KEYS)
     except Exception as e:
         logger.error("[QUIZ] Summary generation failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")

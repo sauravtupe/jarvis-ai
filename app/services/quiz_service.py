@@ -437,17 +437,9 @@ def get_transcript(video_id: str) -> str:
         raise ValueError(f"All transcript methods failed. Last error: {assemblyai_err or err}")
 
 
-def generate_mcqs(transcript: str, groq_api_key: str) -> List[dict]:
+def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
     from langchain_groq import ChatGroq
     from langchain_core.messages import SystemMessage, HumanMessage
-
-    llm = ChatGroq(
-        groq_api_key=groq_api_key,
-        model_name="llama-3.3-70b-versatile",
-        temperature=0.3,
-        max_tokens=4000,
-        request_timeout=60,
-    )
 
     prompt = (
         "Generate exactly 10 multiple choice questions based on this video transcript.\n"
@@ -459,12 +451,29 @@ def generate_mcqs(transcript: str, groq_api_key: str) -> List[dict]:
         f"Transcript:\n{transcript[:8000]}"
     )
 
-    response = llm.invoke([
-        SystemMessage(content="You are an expert quiz generator. Output ONLY valid JSON, no markdown fences, no explanation."),
-        HumanMessage(content=prompt),
-    ])
+    last_err = None
+    for key in groq_api_keys:
+        try:
+            llm = ChatGroq(
+                groq_api_key=key,
+                model_name="llama-3.1-8b-instant",
+                temperature=0.3,
+                max_tokens=4000,
+                request_timeout=60,
+            )
+            response = llm.invoke([
+                SystemMessage(content="You are an expert quiz generator. Output ONLY valid JSON, no markdown fences, no explanation."),
+                HumanMessage(content=prompt),
+            ])
+            raw = (response.content or "").strip()
+            break
+        except Exception as e:
+            last_err = e
+            logger.warning("[QUIZ] Key failed for MCQ generation: %s", e)
+            continue
+    else:
+        raise ValueError(f"All Groq keys exhausted: {last_err}")
 
-    raw = (response.content or "").strip()
     raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'\s*```$', '', raw, flags=re.MULTILINE).strip()
 
@@ -505,17 +514,9 @@ def generate_mcqs(transcript: str, groq_api_key: str) -> List[dict]:
     return validated
 
 
-def generate_summary(transcript: str, groq_api_key: str) -> str:
+def generate_summary(transcript: str, groq_api_keys: list) -> str:
     from langchain_groq import ChatGroq
     from langchain_core.messages import SystemMessage, HumanMessage
-
-    llm = ChatGroq(
-        groq_api_key=groq_api_key,
-        model_name="llama-3.3-70b-versatile",
-        temperature=0.3,
-        max_tokens=2000,
-        request_timeout=60,
-    )
 
     prompt = (
         "Summarise this video transcript in a clear, well-structured format with:\n"
@@ -525,12 +526,27 @@ def generate_summary(transcript: str, groq_api_key: str) -> str:
         f"Transcript:\n{transcript[:8000]}"
     )
 
-    response = llm.invoke([
-        SystemMessage(content="You are an expert content summarizer. Be concise and clear."),
-        HumanMessage(content=prompt),
-    ])
+    last_err = None
+    for key in groq_api_keys:
+        try:
+            llm = ChatGroq(
+                groq_api_key=key,
+                model_name="llama-3.1-8b-instant",
+                temperature=0.3,
+                max_tokens=2000,
+                request_timeout=60,
+            )
+            response = llm.invoke([
+                SystemMessage(content="You are an expert content summarizer. Be concise and clear."),
+                HumanMessage(content=prompt),
+            ])
+            return (response.content or "").strip()
+        except Exception as e:
+            last_err = e
+            logger.warning("[QUIZ] Key failed for summary generation: %s", e)
+            continue
 
-    return (response.content or "").strip()
+    raise ValueError(f"All Groq keys exhausted: {last_err}")
 
 
 def save_quiz_record(record: dict) -> None:
