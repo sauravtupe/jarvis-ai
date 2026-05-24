@@ -27,6 +27,7 @@ let _wakeActive = false;     // "Jarvis" heard, 10-second command window is open
 let _wakeTimeout = null;     // auto-deactivates after 10s of silence
 let recognition = null;
 let ttsPlayer = null;
+let _speakAudio = null;
 const SETTINGS_KEY = 'jarvis_settings';
 const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true, wakeWordMode: false };
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
@@ -371,6 +372,18 @@ function init() {
     ttsPlayer = new TTSPlayer();
     ttsPlayer.onPlaybackComplete = maybeRestartListening;
     if (ttsBtn) ttsBtn.classList.add('tts-active');
+    // Create a shared audio element for speakText — pre-unlocked on first interaction
+    _speakAudio = document.createElement('audio');
+    _speakAudio.preload = 'auto';
+    const _silentWav = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+    const _unlockAllAudio = () => {
+        if (ttsPlayer) ttsPlayer.unlock();
+        _speakAudio.src = _silentWav;
+        _speakAudio.play().catch(() => {});
+    };
+    document.addEventListener('click', _unlockAllAudio);
+    document.addEventListener('keydown', _unlockAllAudio);
+    document.addEventListener('touchstart', _unlockAllAudio);
     setGreeting();
     initOrb();
     initSpeech();
@@ -517,7 +530,10 @@ function initSpeech() {
                                 if (micBtn) micBtn.classList.remove('wake-active');
                             }, 10000);
                             if (micBtn) micBtn.classList.add('wake-active');
-                            speakText('Yes, Sir?');
+                            stopListening();
+                            speakText('Yes, Sir?').then(() => {
+                                if (wakeWordMode && !isListening) setTimeout(() => maybeRestartListening(), 300);
+                            });
                             return;
                         }
                     }
@@ -1983,6 +1999,8 @@ let _quizAudio = null;
 async function speakText(text) {
     if (!ttsPlayer || !ttsPlayer.enabled || !text) return;
     if (_quizAudio) { _quizAudio.pause(); _quizAudio = null; }
+    const audio = _speakAudio || document.createElement('audio');
+    _quizAudio = audio;
     try {
         const res = await fetch(`${API}/tts`, {
             method: 'POST',
@@ -1992,8 +2010,7 @@ async function speakText(text) {
         if (!res.ok) return;
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        _quizAudio = audio;
+        audio.src = url;
         await new Promise((resolve) => {
             audio.onended = () => { URL.revokeObjectURL(url); if (_quizAudio === audio) _quizAudio = null; resolve(); };
             audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
