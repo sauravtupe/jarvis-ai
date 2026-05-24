@@ -221,17 +221,16 @@ async def lifespan(app: FastAPI):
         logger.info("  - Vision (Groq): Ready")
         logger.info("  - Chat Service: Ready")
 
-        # TTS connectivity test — shows in HuggingFace logs whether edge-tts works
+        # TTS connectivity test — shows in HuggingFace logs which engine is active
         try:
-            import concurrent.futures as _cf
-            _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello", TTS_VOICE, TTS_RATE)
-            _tts_test_audio = _tts_test_fut.result(timeout=12)
+            _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir", TTS_VOICE, TTS_RATE)
+            _tts_test_audio = _tts_test_fut.result(timeout=15)
             if _tts_test_audio:
-                logger.info("  - TTS (edge-tts): Ready — voice=%s, size=%d bytes", TTS_VOICE, len(_tts_test_audio))
+                logger.info("  - TTS: Ready — %d bytes (engine=edge-tts or gTTS fallback, voice=%s)", len(_tts_test_audio), TTS_VOICE)
             else:
-                logger.warning("  - TTS (edge-tts): WARNING — empty audio returned, voice=%s", TTS_VOICE)
+                logger.error("  - TTS: FAILED — both edge-tts and gTTS returned empty audio")
         except Exception as _tts_e:
-            logger.error("  - TTS (edge-tts): FAILED — %s (voice=%s) — TTS will be silent", _tts_e, TTS_VOICE)
+            logger.error("  - TTS: FAILED — %s", _tts_e)
 
         logger.info("=" * 60)
         logger.info("J.A.R.V.I.S is online and ready!")
@@ -469,19 +468,37 @@ def _merge_short(sentences):
     return merged
 
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
+    # Try edge-tts first (high-quality Indian voice)
+    try:
+        async def _inner():
+            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+            parts = []
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    parts.append(chunk["data"])
+            return b"".join(parts)
 
-    async def _inner():
-        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
-        parts = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                parts.append(chunk["data"])
-        return b"".join(parts)
+        async def _inner_with_timeout():
+            return await asyncio.wait_for(_inner(), timeout=10)
 
-    async def _inner_with_timeout():
-        return await asyncio.wait_for(_inner(), timeout=10)
+        audio = asyncio.run(_inner_with_timeout())
+        if audio:
+            return audio
+        raise RuntimeError("edge-tts returned empty audio")
 
-    return asyncio.run(_inner_with_timeout())
+    except Exception as e:
+        # Fallback: gTTS uses plain Google HTTP — works from any IP including HuggingFace
+        logger.warning("[TTS] edge-tts failed (%s) — falling back to gTTS", e)
+        try:
+            from gtts import gTTS
+            import io
+            tts = gTTS(text=text, lang="en", tld="co.in")  # Indian English accent
+            buf = io.BytesIO()
+            tts.write_to_fp(buf)
+            return buf.getvalue()
+        except Exception as e2:
+            logger.error("[TTS] gTTS also failed: %s", e2)
+            return b""
 
 def _pick_tts_voice(text: str) -> str:
     if any('ऀ' <= c <= 'ॿ' for c in text):
