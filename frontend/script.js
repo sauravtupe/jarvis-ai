@@ -1171,13 +1171,15 @@ async function sendMessageWithImage(text, imgBase64) {
     const controller = new AbortController();
     try {
         timeoutId = setTimeout(() => controller.abort(), 300000);
+        const _ttsFlag2 = !!(ttsPlayer && ttsPlayer.enabled);
+        console.log('[TTS] sending vision request — tts:', _ttsFlag2, '| player:', !!ttsPlayer, '| enabled:', ttsPlayer?.enabled);
         const res = await fetch(`${API}/chat/jarvis/stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
             body: JSON.stringify({
                 message: messageToSend,
                 session_id: sessionId,
-                tts: !!(ttsPlayer && ttsPlayer.enabled),
+                tts: _ttsFlag2,
                 imgbase64: imgBase64,
             }),
             signal: controller.signal,
@@ -1851,13 +1853,15 @@ async function sendMessage(textOverride) {
             preStarterPlayer.play(() => {});
         }
         timeoutId = setTimeout(() => controller.abort(), 300000);
+        const _ttsFlag = !!(ttsPlayer && ttsPlayer.enabled);
+        console.log('[TTS] sending request — tts:', _ttsFlag, '| player:', !!ttsPlayer, '| enabled:', ttsPlayer?.enabled);
         const res = await fetch(`${API}${endpoint}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
             body: JSON.stringify({
                 message: messageToSend,
                 session_id: sessionId,
-                tts: !!(ttsPlayer && ttsPlayer.enabled),
+                tts: _ttsFlag,
                 imgbase64: imgBase64 || null
             }),
             signal: controller.signal,

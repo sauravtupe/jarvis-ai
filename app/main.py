@@ -222,6 +222,19 @@ async def lifespan(app: FastAPI):
         logger.info("  - Background Task Manager: Ready")
         logger.info("  - Vision (Groq): Ready")
         logger.info("  - Chat Service: Ready")
+
+        # TTS connectivity test — shows in HuggingFace logs whether edge-tts works
+        try:
+            import concurrent.futures as _cf
+            _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello", TTS_VOICE, TTS_RATE)
+            _tts_test_audio = _tts_test_fut.result(timeout=12)
+            if _tts_test_audio:
+                logger.info("  - TTS (edge-tts): Ready — voice=%s, size=%d bytes", TTS_VOICE, len(_tts_test_audio))
+            else:
+                logger.warning("  - TTS (edge-tts): WARNING — empty audio returned, voice=%s", TTS_VOICE)
+        except Exception as _tts_e:
+            logger.error("  - TTS (edge-tts): FAILED — %s (voice=%s) — TTS will be silent", _tts_e, TTS_VOICE)
+
         logger.info("=" * 60)
         logger.info("J.A.R.V.I.S is online and ready!")
         logger.info("API: http://localhost:8000")
@@ -462,14 +475,15 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
     async def _inner():
         communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
         parts = []
-
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 parts.append(chunk["data"])
-
         return b"".join(parts)
 
-    return asyncio.run(_inner())
+    async def _inner_with_timeout():
+        return await asyncio.wait_for(_inner(), timeout=10)
+
+    return asyncio.run(_inner_with_timeout())
 
 def _pick_tts_voice(text: str) -> str:
     if any('ऀ' <= c <= 'ॿ' for c in text):
@@ -506,9 +520,9 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
                 audio = fut.result()
                 b64 = base64.b64encode(audio).decode("ascii")
                 events.append(f"data: {json.dumps({'audio': b64, 'sentence': sent})}\n\n")
-
             except Exception as exc:
-                logger.warning("[TTS-INLINE] Failed for '%s': %s", sent[:40], exc)
+                logger.error("[TTS-INLINE] Failed for '%s': %s", sent[:40], exc)
+                events.append(f"data: {json.dumps({'audio': '', 'sentence': sent})}\n\n")
         return events
     
     def _yield_completed_audio():
