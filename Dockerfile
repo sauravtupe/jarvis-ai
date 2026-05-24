@@ -22,6 +22,9 @@ COPY . .
 # Create required directories
 RUN mkdir -p database/chats_data database/learning_data database/vector_store database/camera_captures database/uploads database/quizzes
 
+# Generate starter/thinking audio clips (en-IN-PrabhatNeural voice)
+RUN python app/generate_thinking_audio.py || echo "[WARN] Starter audio generation failed — will retry at runtime"
+
 EXPOSE 7860
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
