@@ -472,49 +472,48 @@ def _merge_short(sentences):
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
     import os as _os
     _on_hf = bool(_os.getenv("SPACE_ID"))
-    _edge_timeout = 20 if _on_hf else 10
 
-    # Tier 1: edge-tts — en-IN-PrabhatNeural is male Indian voice
-    try:
-        async def _inner():
-            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
-            parts = []
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    parts.append(chunk["data"])
-            return b"".join(parts)
+    if _on_hf:
+        # On HuggingFace: StreamElements "Brian" is PRIMARY — plain HTTPS, always male, always consistent
+        # edge-tts WebSocket to Microsoft is unreliable on HF and causes voice switching mid-response
+        try:
+            import requests as _req
+            _chunks = [text[i:i + 500] for i in range(0, min(len(text), 4000), 500)]
+            _parts = []
+            for _chunk in _chunks:
+                r = _req.get(
+                    "https://api.streamelements.com/kappa/v2/speech",
+                    params={"voice": "Brian", "text": _chunk},
+                    timeout=8,
+                )
+                if r.status_code == 200 and r.content:
+                    _parts.append(r.content)
+                else:
+                    raise RuntimeError(f"StreamElements HTTP {r.status_code}")
+            if _parts:
+                return b"".join(_parts)
+            raise RuntimeError("StreamElements returned no audio")
+        except Exception as e:
+            logger.warning("[TTS] StreamElements failed (%s) — falling back to gTTS", e)
+    else:
+        # On localhost: edge-tts is PRIMARY — en-IN-PrabhatNeural is male Indian voice
+        try:
+            async def _inner():
+                communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+                parts = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        parts.append(chunk["data"])
+                return b"".join(parts)
 
-        audio = asyncio.run(asyncio.wait_for(_inner(), timeout=_edge_timeout))
-        if audio:
-            return audio
-        raise RuntimeError("edge-tts returned empty audio")
+            audio = asyncio.run(asyncio.wait_for(_inner(), timeout=10))
+            if audio:
+                return audio
+            raise RuntimeError("edge-tts returned empty audio")
+        except Exception as e:
+            logger.warning("[TTS] edge-tts failed (%s) — falling back to gTTS", e)
 
-    except Exception as e:
-        logger.warning("[TTS] edge-tts failed (%s)", e)
-
-    # Tier 2: StreamElements "Brian" — British male voice, plain HTTPS, no API key needed
-    try:
-        import requests as _req
-        import io as _io
-        _chunks = [text[i:i + 500] for i in range(0, min(len(text), 4000), 500)]
-        _parts = []
-        for _chunk in _chunks:
-            r = _req.get(
-                "https://api.streamelements.com/kappa/v2/speech",
-                params={"voice": "Brian", "text": _chunk},
-                timeout=8,
-            )
-            if r.status_code == 200 and r.content:
-                _parts.append(r.content)
-            else:
-                raise RuntimeError(f"StreamElements HTTP {r.status_code}")
-        if _parts:
-            return b"".join(_parts)
-        raise RuntimeError("StreamElements returned no audio")
-    except Exception as e2:
-        logger.warning("[TTS] StreamElements failed (%s) — falling back to gTTS", e2)
-
-    # Tier 3: gTTS — Indian English accent but female (last resort)
+    # Fallback: gTTS — Indian English accent, female (last resort only)
     try:
         from gtts import gTTS
         import io
