@@ -420,6 +420,32 @@ textarea { font-family: var(--font); color: var(--text); }
     box-shadow: 0 4px 18px rgba(124, 106, 239, 0.18);
 }
 
+.msg-speak-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 10px;
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 20px;
+    color: rgba(255, 255, 255, 0.4);
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    transition: background 0.18s, color 0.18s, border-color 0.18s;
+}
+.msg-speak-btn::after { content: 'Read aloud'; }
+.msg-speak-btn:hover {
+    background: rgba(255, 255, 255, 0.07);
+    color: rgba(255, 255, 255, 0.8);
+    border-color: rgba(255, 255, 255, 0.25);
+}
+.msg-speak-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
 .msg-label {
     font-size: 0.66rem;
     font-weight: 500;

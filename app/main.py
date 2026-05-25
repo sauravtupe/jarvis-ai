@@ -470,37 +470,46 @@ def _merge_short(sentences):
     return merged
 
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
-    # Try edge-tts first (high-quality Indian voice)
+    import os as _os
+    # HuggingFace sets SPACE_ID automatically — edge-tts WebSocket is unreliable there
+    _on_hf = bool(_os.getenv("SPACE_ID"))
+
+    if not _on_hf:
+        # Localhost: try edge-tts first (better quality)
+        try:
+            async def _inner():
+                communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+                parts = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        parts.append(chunk["data"])
+                return b"".join(parts)
+
+            async def _inner_with_timeout():
+                return await asyncio.wait_for(_inner(), timeout=10)
+
+            audio = asyncio.run(_inner_with_timeout())
+            if audio:
+                return audio
+            raise RuntimeError("edge-tts returned empty audio")
+
+        except Exception as e:
+            logger.warning("[TTS] edge-tts failed (%s) — falling back to gTTS", e)
+
+    # gTTS: plain HTTPS to Google — works from any network including HuggingFace
     try:
-        async def _inner():
-            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
-            parts = []
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    parts.append(chunk["data"])
-            return b"".join(parts)
-
-        async def _inner_with_timeout():
-            return await asyncio.wait_for(_inner(), timeout=10)
-
-        audio = asyncio.run(_inner_with_timeout())
+        from gtts import gTTS
+        import io
+        tts = gTTS(text=text, lang="en", tld="co.in")  # Indian English accent
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        audio = buf.getvalue()
         if audio:
             return audio
-        raise RuntimeError("edge-tts returned empty audio")
-
-    except Exception as e:
-        # Fallback: gTTS uses plain Google HTTP — works from any IP including HuggingFace
-        logger.warning("[TTS] edge-tts failed (%s) — falling back to gTTS", e)
-        try:
-            from gtts import gTTS
-            import io
-            tts = gTTS(text=text, lang="en", tld="co.in")  # Indian English accent
-            buf = io.BytesIO()
-            tts.write_to_fp(buf)
-            return buf.getvalue()
-        except Exception as e2:
-            logger.error("[TTS] gTTS also failed: %s", e2)
-            return b""
+        raise RuntimeError("gTTS returned empty bytes")
+    except Exception as e2:
+        logger.error("[TTS] gTTS failed: %s", e2)
+        return b""
 
 def _pick_tts_voice(text: str) -> str:
     if any('ऀ' <= c <= 'ॿ' for c in text):
@@ -1074,20 +1083,20 @@ async def text_to_speech(request: TTSRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
 
-    async def generate():
-        try:
-            communicate = edge_tts.Communicate(text=text, voice=_pick_tts_voice(text), rate=TTS_RATE)
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    yield chunk["data"]
-        except Exception as e:
-            logger.error("[TTS] Error generating speech: %s", e)
-
-    return StreamingResponse(
-        generate(),
-        media_type="audio/mpeg",
-        headers={"Cache-Control": "no-cache"},
+    loop = asyncio.get_event_loop()
+    audio = await loop.run_in_executor(
+        _tts_pool,
+        _generate_tts_sync,
+        text[:4000],
+        _pick_tts_voice(text),
+        TTS_RATE,
     )
+
+    if not audio:
+        raise HTTPException(status_code=500, detail="TTS generation failed")
+
+    from fastapi.responses import Response as _BinaryResponse
+    return _BinaryResponse(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-cache"})
 
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 

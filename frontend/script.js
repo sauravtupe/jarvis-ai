@@ -23,6 +23,7 @@ let currentQuiz = null;      // { questions[], currentIdx, score, contentEl }
 let recognition = null;
 let ttsPlayer = null;
 let _speakAudio = null;
+let _ttsAudio = null;   // dedicated pre-unlocked element for inline TTS playback
 const SETTINGS_KEY = 'jarvis_settings';
 const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true };
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
@@ -243,6 +244,50 @@ function _browserSpeak(text) {
     else { window.speechSynthesis.onvoiceschanged = setVoice; }
 }
 
+// POST to /tts endpoint and play returned audio on the pre-unlocked element.
+// Called from the per-message 🔊 button — guaranteed user gesture context.
+async function speakText(btn, text) {
+    if (!text) return;
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+    try {
+        const res = await fetch(`${API}/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ text: text.slice(0, 4000) }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = _ttsAudio || new Audio();
+        if (!audio.paused) audio.pause();
+        audio.onended = () => { try { URL.revokeObjectURL(url); } catch (_) {} };
+        audio.onerror = () => { try { URL.revokeObjectURL(url); } catch (_) {} _browserSpeak(text); };
+        audio.src = url;
+        audio.currentTime = 0;
+        audio.play().catch(() => { _browserSpeak(text); });
+    } catch (e) {
+        console.warn('[speakText] backend failed:', e.message);
+        _browserSpeak(text);
+    } finally {
+        if (btn) { setTimeout(() => { btn.disabled = false; btn.style.opacity = ''; }, 2000); }
+    }
+}
+
+// Add a 🔊 speak button to a Jarvis message after the stream completes.
+// This is the guaranteed fallback: button click = user gesture = audio always plays.
+function addSpeakButton(contentEl, text) {
+    if (!contentEl || !text) return;
+    const existing = contentEl.querySelector('.msg-speak-btn');
+    if (existing) existing.remove();
+    const btn = document.createElement('button');
+    btn.className = 'msg-speak-btn';
+    btn.title = 'Read response aloud';
+    btn.setAttribute('aria-label', 'Read response aloud');
+    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
+    btn.addEventListener('click', (e) => { e.preventDefault(); speakText(btn, text); });
+    contentEl.appendChild(btn);
+}
+
 class TTSPlayer {
     constructor() {
         this.queue = [];
@@ -366,18 +411,25 @@ class TTSPlayer {
         });
     }
     _playHTML(b64) {
-        // Creates a fresh Audio element each time — no shared state, no load() trust issues
+        // Reuse the pre-unlocked _ttsAudio element — bypasses iframe autoplay restrictions.
+        // A single element, once successfully played from a user gesture, stays unlocked
+        // for all future play() calls on that same element even without a gesture.
         return new Promise(resolve => {
             try {
                 const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
                 const blob = new Blob([bytes], { type: 'audio/mpeg' });
                 const url = URL.createObjectURL(blob);
-                const audio = new Audio(url);
+                const audio = _ttsAudio || new Audio();
                 const done = () => { try { URL.revokeObjectURL(url); } catch (_) {} resolve(); };
+                audio.onended = null;
+                audio.onerror = null;
                 audio.onended = done;
                 audio.onerror = () => { console.warn('[TTS] HTML audio error'); done(); };
+                if (!audio.paused) audio.pause();
+                audio.src = url;
+                audio.currentTime = 0;
                 audio.play().then(() => { this._didPlay = true; }).catch(e => {
-                    console.warn('[TTS] play() blocked:', e.name, '— interact with the page first');
+                    console.warn('[TTS] play() blocked:', e.name, '— audio element not yet unlocked');
                     done();
                 });
             } catch (e) {
@@ -454,14 +506,27 @@ function init() {
     ttsPlayer = new TTSPlayer();
     ttsPlayer.onPlaybackComplete = maybeRestartListening;
     if (ttsBtn) ttsBtn.classList.add('tts-active');
-    // Create a shared audio element for speakText — pre-unlocked on first interaction
+    // Create shared audio elements — pre-unlocked on first user interaction.
+    // A single HTMLAudioElement, once played from a user gesture, stays unlocked for
+    // all future play() calls — even in iframes without allow="autoplay".
     _speakAudio = document.createElement('audio');
     _speakAudio.preload = 'auto';
+    _ttsAudio = document.createElement('audio');
+    _ttsAudio.preload = 'auto';
     const _silentWav = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+    let _audioUnlocked = false;
     const _unlockAllAudio = () => {
         if (ttsPlayer) ttsPlayer.unlock();
         _speakAudio.src = _silentWav;
         _speakAudio.play().catch(() => {});
+        // Unlock the dedicated TTS element once — after that, play() works without gesture
+        if (!_audioUnlocked) {
+            _audioUnlocked = true;
+            _ttsAudio.src = _silentWav;
+            _ttsAudio.play().then(() => {
+                console.log('[TTS] _ttsAudio unlocked — auto-play will work');
+            }).catch(() => {});
+        }
     };
     document.addEventListener('click', _unlockAllAudio);
     document.addEventListener('keydown', _unlockAllAudio);
@@ -1169,6 +1234,7 @@ async function sendMessageWithImage(text, imgBase64) {
             if (streamDone) break;
         }
         if (cursorEl) cursorEl.remove();
+        addSpeakButton(contentEl, fullResponse);
         if (_ttsFlag2 && fullResponse) {
             if (!_ttsGotAudio2) {
                 console.log('[TTS] no backend audio — browser speechSynthesis fallback');
@@ -1825,14 +1891,12 @@ async function sendMessage(textOverride) {
             if (streamDone) break;
         }
         if (cursorEl) cursorEl.remove();
-        // Browser TTS fallback
+        addSpeakButton(contentEl, fullResponse);
         if (_ttsFlag && fullResponse) {
             if (!_ttsGotAudio) {
-                // Backend sent no audio — use browser TTS immediately
                 console.log('[TTS] no backend audio — browser speechSynthesis fallback');
                 _browserSpeak(fullResponse);
             } else {
-                // Audio received — give it 3s to start playing; fall back if it never does
                 const _savedResp = fullResponse;
                 setTimeout(() => {
                     if (ttsPlayer && !ttsPlayer._didPlay) {
