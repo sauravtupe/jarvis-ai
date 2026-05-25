@@ -471,11 +471,10 @@ def _merge_short(sentences):
 
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
     import os as _os
-    # On HuggingFace use a shorter timeout; localhost can wait longer
     _on_hf = bool(_os.getenv("SPACE_ID"))
-    _edge_timeout = 5 if _on_hf else 10
+    _edge_timeout = 20 if _on_hf else 10
 
-    # Always try edge-tts first — en-IN-PrabhatNeural is male Indian voice
+    # Tier 1: edge-tts — en-IN-PrabhatNeural is male Indian voice
     try:
         async def _inner():
             communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
@@ -485,30 +484,49 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
                     parts.append(chunk["data"])
             return b"".join(parts)
 
-        async def _inner_with_timeout():
-            return await asyncio.wait_for(_inner(), timeout=_edge_timeout)
-
-        audio = asyncio.run(_inner_with_timeout())
+        audio = asyncio.run(asyncio.wait_for(_inner(), timeout=_edge_timeout))
         if audio:
             return audio
         raise RuntimeError("edge-tts returned empty audio")
 
     except Exception as e:
-        logger.warning("[TTS] edge-tts failed (%s) — falling back to gTTS", e)
+        logger.warning("[TTS] edge-tts failed (%s)", e)
 
-    # gTTS fallback: plain HTTPS to Google — works from any network including HuggingFace
+    # Tier 2: StreamElements "Brian" — British male voice, plain HTTPS, no API key needed
+    try:
+        import requests as _req
+        import io as _io
+        _chunks = [text[i:i + 500] for i in range(0, min(len(text), 4000), 500)]
+        _parts = []
+        for _chunk in _chunks:
+            r = _req.get(
+                "https://api.streamelements.com/kappa/v2/speech",
+                params={"voice": "Brian", "text": _chunk},
+                timeout=8,
+            )
+            if r.status_code == 200 and r.content:
+                _parts.append(r.content)
+            else:
+                raise RuntimeError(f"StreamElements HTTP {r.status_code}")
+        if _parts:
+            return b"".join(_parts)
+        raise RuntimeError("StreamElements returned no audio")
+    except Exception as e2:
+        logger.warning("[TTS] StreamElements failed (%s) — falling back to gTTS", e2)
+
+    # Tier 3: gTTS — Indian English accent but female (last resort)
     try:
         from gtts import gTTS
         import io
-        tts = gTTS(text=text, lang="en", tld="co.in")  # Indian English accent
+        tts = gTTS(text=text, lang="en", tld="co.in")
         buf = io.BytesIO()
         tts.write_to_fp(buf)
         audio = buf.getvalue()
         if audio:
             return audio
         raise RuntimeError("gTTS returned empty bytes")
-    except Exception as e2:
-        logger.error("[TTS] gTTS failed: %s", e2)
+    except Exception as e3:
+        logger.error("[TTS] gTTS failed: %s", e3)
         return b""
 
 def _pick_tts_voice(text: str) -> str:
