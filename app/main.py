@@ -474,6 +474,11 @@ _piper_voice_obj = None
 _piper_voice_failed = False
 _piper_voice_lock = _threading.Lock()
 
+_PIPER_MODELS = [
+    '/app/models/en_IN-male-medium.onnx',  # Indian English male (preferred)
+    '/app/models/en_US-ryan-high.onnx',    # American English male (fallback)
+]
+
 def _get_piper_voice():
     global _piper_voice_obj, _piper_voice_failed
     if _piper_voice_failed:
@@ -485,12 +490,13 @@ def _get_piper_voice():
             try:
                 import os
                 from piper.voice import PiperVoice
-                model = '/app/models/en_IN-male-medium.onnx'
-                if os.path.exists(model):
-                    _piper_voice_obj = PiperVoice.load(model)
-                    logger.info("[TTS] Piper Indian English male voice loaded")
-                else:
-                    logger.warning("[TTS] Piper model not found at %s", model)
+                for model in _PIPER_MODELS:
+                    if os.path.exists(model):
+                        _piper_voice_obj = PiperVoice.load(model)
+                        logger.info("[TTS] Piper voice loaded: %s", model)
+                        break
+                if _piper_voice_obj is None:
+                    logger.warning("[TTS] No piper model found in %s", _PIPER_MODELS)
                     _piper_voice_failed = True
             except Exception as e:
                 logger.warning("[TTS] Piper init failed: %s", e)
@@ -522,26 +528,31 @@ def _piper_male(text: str) -> bytes:
 
 
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
-    import os as _os, subprocess as _sp, tempfile as _tf
+    import sys as _sys, os as _os, subprocess as _sp, tempfile as _tf
 
-    # Tier 1: edge-tts CLI via subprocess — avoids asyncio/uvicorn event loop conflict
-    # Running edge-tts as a subprocess gives it a clean process with its own event loop
+    # Tier 1: edge-tts in a fresh Python subprocess (clean event loop, no uvicorn asyncio conflict)
+    # Use sys.executable — always the correct interpreter regardless of PATH
     tmp = _tf.NamedTemporaryFile(suffix='.mp3', delete=False)
     tmpfile = tmp.name
     tmp.close()
     try:
-        result = _sp.run(
-            ['edge-tts', '--voice', voice, '--rate', rate, '--text', text, '--write-media', tmpfile],
-            capture_output=True, timeout=30,
+        script = (
+            "import asyncio, edge_tts\n"
+            "async def _r():\n"
+            f"    c = edge_tts.Communicate(text={repr(text)}, voice={repr(voice)}, rate={repr(rate)})\n"
+            f"    await c.save({repr(tmpfile)})\n"
+            "asyncio.run(_r())\n"
         )
+        result = _sp.run([_sys.executable, '-c', script], capture_output=True, timeout=30)
         if result.returncode == 0 and _os.path.getsize(tmpfile) > 0:
             with open(tmpfile, 'rb') as f:
                 audio = f.read()
             if audio:
+                logger.info("[TTS] edge-tts OK voice=%s len=%d", voice, len(audio))
                 return audio
-        logger.warning("[TTS] edge-tts CLI exit %d: %s", result.returncode, result.stderr[:200])
+        logger.warning("[TTS] edge-tts subprocess exit %d: %s", result.returncode, result.stderr[-300:])
     except Exception as e:
-        logger.warning("[TTS] edge-tts CLI failed: %s", e)
+        logger.warning("[TTS] edge-tts subprocess failed: %s", e)
     finally:
         try:
             _os.unlink(tmpfile)

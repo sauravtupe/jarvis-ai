@@ -19,15 +19,23 @@ COPY requirements.txt .
 # Install remaining dependencies (torch already installed above)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download Piper Indian English male neural voice model (~63MB, runs offline at runtime)
+# Download Piper voice models (Indian English male preferred, US Ryan as guaranteed fallback)
 RUN python -c "\
 import urllib.request, os; \
 os.makedirs('/app/models', exist_ok=True); \
-base='https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_IN/male/medium'; \
-urllib.request.urlretrieve(base+'/en_IN-male-medium.onnx', '/app/models/en_IN-male-medium.onnx'); \
-urllib.request.urlretrieve(base+'/en_IN-male-medium.onnx.json', '/app/models/en_IN-male-medium.onnx.json'); \
-print('[OK] Piper en_IN male model ready') \
-" || echo "[WARN] Piper model download failed — will fall back to gTTS"
+base='https://huggingface.co/rhasspy/piper-voices/resolve/main'; \
+urllib.request.urlretrieve(base+'/en/en_IN/male/medium/en_IN-male-medium.onnx', '/app/models/en_IN-male-medium.onnx'); \
+urllib.request.urlretrieve(base+'/en/en_IN/male/medium/en_IN-male-medium.onnx.json', '/app/models/en_IN-male-medium.onnx.json'); \
+print('[OK] Piper en_IN-male-medium downloaded') \
+" || echo "[INFO] en_IN voice unavailable, ryan will be used"
+RUN python -c "\
+import urllib.request, os; \
+os.makedirs('/app/models', exist_ok=True); \
+base='https://huggingface.co/rhasspy/piper-voices/resolve/main'; \
+urllib.request.urlretrieve(base+'/en/en_US/ryan/high/en_US-ryan-high.onnx', '/app/models/en_US-ryan-high.onnx'); \
+urllib.request.urlretrieve(base+'/en/en_US/ryan/high/en_US-ryan-high.onnx.json', '/app/models/en_US-ryan-high.onnx.json'); \
+print('[OK] Piper en_US-ryan-high downloaded') \
+" || echo "[WARN] Piper fallback model also failed"
 
 COPY . .
 
