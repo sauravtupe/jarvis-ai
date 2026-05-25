@@ -497,31 +497,26 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
     import os as _os
     _on_hf = bool(_os.getenv("SPACE_ID"))
 
-    # Tier 1: edge-tts (Indian male en-IN-PrabhatNeural) — works on localhost, try on HF too
-    try:
-        async def _inner():
-            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
-            parts = []
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    parts.append(chunk["data"])
-            return b"".join(parts)
+    # edge-tts — PrabhatNeural Indian male (same voice as thinking clips)
+    # HF needs a longer timeout than localhost; retry once before giving up
+    async def _edge_inner():
+        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+        parts = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                parts.append(chunk["data"])
+        return b"".join(parts)
 
-        _timeout = 8 if _on_hf else 12
-        audio = asyncio.run(asyncio.wait_for(_inner(), timeout=_timeout))
-        if audio:
-            return audio
-        raise RuntimeError("edge-tts returned empty audio")
-    except Exception as e:
-        logger.warning("[TTS] edge-tts failed (%s)", e)
+    _timeout = 25 if _on_hf else 15
+    for _attempt in range(2):
+        try:
+            audio = asyncio.run(asyncio.wait_for(_edge_inner(), timeout=_timeout))
+            if audio:
+                return audio
+        except Exception as e:
+            logger.warning("[TTS] edge-tts attempt %d failed: %s", _attempt + 1, e)
 
-    # Tier 2 (HF only): espeak-ng local — Indian English male, no network, always available
-    if _on_hf:
-        audio = _espeak_male(text)
-        if audio:
-            return audio
-
-    # Tier 3: gTTS — last resort, female but always works
+    # Last resort: gTTS Indian English — natural-sounding (female) when edge-tts is down
     try:
         from gtts import gTTS
         import io
@@ -532,8 +527,8 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         if audio:
             return audio
         raise RuntimeError("gTTS returned empty bytes")
-    except Exception as e3:
-        logger.error("[TTS] gTTS failed: %s", e3)
+    except Exception as e:
+        logger.error("[TTS] gTTS also failed: %s", e)
         return b""
 
 def _pick_tts_voice(text: str) -> str:
