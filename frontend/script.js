@@ -23,6 +23,21 @@ let currentQuiz = null;      // { questions[], currentIdx, score, contentEl }
 let recognition = null;
 let ttsPlayer = null;
 let _speakAudio = null;
+// True while Jarvis is producing speech. Used to mute speech recognition so the
+// mic does not capture Jarvis's own voice and treat it as user input.
+let _jarvisSpeaking = false;
+
+function _onJarvisSpeechStart() {
+    _jarvisSpeaking = true;
+    if (isListening) {
+        try { recognition && recognition.stop(); } catch (_) {}
+    }
+}
+
+function _onJarvisSpeechEnd() {
+    _jarvisSpeaking = false;
+    maybeRestartListening();
+}
 let _ttsAudio = null;   // dedicated pre-unlocked element for inline TTS playback
 const SETTINGS_KEY = 'jarvis_settings';
 const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true };
@@ -208,10 +223,12 @@ class PreStarterPlayer {
             fired = true;
             this.audio.onended = null;
             this.audio.onerror = null;
+            _onJarvisSpeechEnd();
             if (onComplete) onComplete();
         };
         this.audio.onended = done;
         this.audio.onerror = done;
+        _onJarvisSpeechStart();
         const p = this.audio.play();
         if (p) p.catch(done);
     }
@@ -345,6 +362,7 @@ class TTSPlayer {
         if (ttsBtn) ttsBtn.classList.remove('tts-speaking');
         if (orbContainer) orbContainer.classList.remove('speaking');
         if (orb) orb.setActive(false);
+        _onJarvisSpeechEnd();
         if (typeof this.onPlaybackComplete === 'function') this.onPlaybackComplete();
     }
     reset() {
@@ -356,6 +374,7 @@ class TTSPlayer {
     async _playLoop() {
         if (this.playing) return;
         this.playing = true;
+        _onJarvisSpeechStart();
         this._loopId = (this._loopId || 0) + 1;
         const myId = this._loopId;
         if (ttsBtn) ttsBtn.classList.add('tts-speaking');
@@ -370,11 +389,12 @@ class TTSPlayer {
                 console.warn('[TTS] segment error:', e);
             }
         }
-        if (myId !== this._loopId) { this.playing = false; return; }
+        if (myId !== this._loopId) { this.playing = false; _onJarvisSpeechEnd(); return; }
         this.playing = false;
         if (ttsBtn) ttsBtn.classList.remove('tts-speaking');
         if (orbContainer) orbContainer.classList.remove('speaking');
         if (orb) orb.setActive(false);
+        _onJarvisSpeechEnd();
         if (typeof this.onPlaybackComplete === 'function') this.onPlaybackComplete();
     }
     _playB64(b64) {
@@ -631,6 +651,11 @@ function initSpeech() {
     recognition.lang = 'en-IN';
     recognition.onresult = e => {
         if (!e.results || e.results.length === 0) return;
+        // Drop anything the mic captured while Jarvis was speaking — this is Jarvis's own voice.
+        if (_jarvisSpeaking) {
+            if (speechWidgetText) speechWidgetText.textContent = '';
+            return;
+        }
         const last = e.results[e.results.length - 1];
         // Pick the longest alternative transcript
         let transcript = '';
@@ -758,14 +783,14 @@ function stopListening() {
 function maybeRestartListening() {
     if (!recognition) return;
     if (isStreaming) return;
-    // Never restart while TTS is playing — mic would capture Jarvis's own voice.
-    // ttsPlayer.onPlaybackComplete is already wired to this function, so it will
-    // fire again automatically once TTS finishes.
+    // Never restart while Jarvis is speaking — mic would capture Jarvis's own voice.
+    // _onJarvisSpeechEnd() calls this function again once TTS finishes.
+    if (_jarvisSpeaking) return;
     const ttsActive = ttsPlayer && (ttsPlayer.playing || ttsPlayer.queue.length > 0);
     if (ttsActive) return;
     if (!autoListenMode) return;
     setTimeout(() => {
-        if (autoListenMode && !isStreaming && !isListening && recognition) {
+        if (autoListenMode && !isStreaming && !isListening && recognition && !_jarvisSpeaking) {
             startListening();
         }
     }, SPEECH_RESTART_DELAY_MS);
@@ -2018,6 +2043,7 @@ async function speakText(text) {
     if (_quizAudio) { _quizAudio.pause(); _quizAudio = null; }
     const audio = _speakAudio || document.createElement('audio');
     _quizAudio = audio;
+    let spoke = false;
     try {
         const res = await fetch(`${API}/tts`, {
             method: 'POST',
@@ -2028,6 +2054,8 @@ async function speakText(text) {
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         audio.src = url;
+        _onJarvisSpeechStart();
+        spoke = true;
         await new Promise((resolve) => {
             audio.onended = () => { URL.revokeObjectURL(url); if (_quizAudio === audio) _quizAudio = null; resolve(); };
             audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
@@ -2035,6 +2063,8 @@ async function speakText(text) {
         });
     } catch (e) {
         console.warn('speakText error:', e);
+    } finally {
+        if (spoke) _onJarvisSpeechEnd();
     }
 }
 
