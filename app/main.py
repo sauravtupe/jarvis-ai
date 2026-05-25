@@ -229,10 +229,10 @@ async def lifespan(app: FastAPI):
             logger.error("  - TTS: FAILED — OPENAI_API_KEY not set in environment / HF Secrets")
         else:
             try:
-                _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir, I am ready.", "onyx", TTS_RATE)
+                _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir, I am ready.", "ash", TTS_RATE)
                 _tts_test_audio = _tts_test_fut.result(timeout=30)
                 if _tts_test_audio:
-                    logger.info("  - TTS: Ready — OpenAI gpt-4o-mini-tts, voice=onyx (Indian male), %d bytes", len(_tts_test_audio))
+                    logger.info("  - TTS: Ready — OpenAI gpt-4o-mini-tts, voice=ash (Indian male), %d bytes", len(_tts_test_audio))
                 else:
                     logger.error("  - TTS: FAILED — OpenAI returned empty audio (check API key validity and quota)")
             except Exception as _tts_e:
@@ -505,14 +505,14 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         # gpt-4o-mini-tts supports `instructions` to steer accent and tone
         response = client.audio.speech.create(
             model="gpt-4o-mini-tts",
-            voice="onyx",
+            voice="ash",
             input=text,
             instructions=_OPENAI_TTS_INSTRUCTIONS,
             response_format="mp3",
         )
         audio = response.content
         if audio:
-            logger.info("[TTS] OpenAI gpt-4o-mini-tts OK voice=onyx len=%d", len(audio))
+            logger.info("[TTS] OpenAI gpt-4o-mini-tts OK voice=ash len=%d", len(audio))
             return audio
         logger.warning("[TTS] OpenAI gpt-4o-mini-tts returned empty audio — trying tts-1")
     except Exception as e:
@@ -524,13 +524,13 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         client = OpenAI(api_key=api_key, timeout=30.0)
         response = client.audio.speech.create(
             model="tts-1",
-            voice="onyx",
+            voice="ash",
             input=text,
             response_format="mp3",
         )
         audio = response.content
         if audio:
-            logger.info("[TTS] OpenAI tts-1 fallback OK voice=onyx len=%d", len(audio))
+            logger.info("[TTS] OpenAI tts-1 fallback OK voice=ash len=%d", len(audio))
             return audio
         logger.error("[TTS] OpenAI tts-1 fallback also returned empty audio")
     except Exception as e:
@@ -540,8 +540,8 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
 
 
 def _pick_tts_voice(text: str) -> str:
-    """Kept for call-site compatibility — OpenAI always uses 'onyx' regardless of input."""
-    return "onyx"
+    """Kept for call-site compatibility — OpenAI always uses 'ash' regardless of input."""
+    return "ash"
 
 _tts_pool = ThreadPoolExecutor(max_workers=4)
 
