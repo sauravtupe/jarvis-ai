@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     g++ \
     git \
     ffmpeg \
+    espeak-ng \
+    espeak-ng-data \
     && rm -rf /var/lib/apt/lists/*
 
 # Install CPU-only torch (pinned to match transformers==4.44.2)

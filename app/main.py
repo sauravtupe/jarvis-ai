@@ -469,51 +469,59 @@ def _merge_short(sentences):
 
     return merged
 
+def _espeak_male(text: str) -> bytes:
+    """Local espeak-ng → ffmpeg pipeline. Male Indian English, no network needed."""
+    import subprocess as _sp
+    try:
+        espeak = _sp.Popen(
+            ['espeak-ng', '-v', 'en-IN', '-s', '145', '-p', '55', '--stdout'],
+            stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.DEVNULL,
+        )
+        ffmpeg = _sp.Popen(
+            ['ffmpeg', '-i', 'pipe:0', '-f', 'mp3', '-ar', '22050', '-ab', '64k',
+             'pipe:1', '-loglevel', 'quiet'],
+            stdin=espeak.stdout, stdout=_sp.PIPE, stderr=_sp.DEVNULL,
+        )
+        espeak.stdout.close()
+        espeak.stdin.write(text.encode('utf-8'))
+        espeak.stdin.close()
+        mp3, _ = ffmpeg.communicate(timeout=20)
+        espeak.wait()
+        return mp3 or b""
+    except Exception as e:
+        logger.warning("[TTS] espeak-ng failed: %s", e)
+        return b""
+
+
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
     import os as _os
     _on_hf = bool(_os.getenv("SPACE_ID"))
 
+    # Tier 1: edge-tts (Indian male en-IN-PrabhatNeural) — works on localhost, try on HF too
+    try:
+        async def _inner():
+            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+            parts = []
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    parts.append(chunk["data"])
+            return b"".join(parts)
+
+        _timeout = 8 if _on_hf else 12
+        audio = asyncio.run(asyncio.wait_for(_inner(), timeout=_timeout))
+        if audio:
+            return audio
+        raise RuntimeError("edge-tts returned empty audio")
+    except Exception as e:
+        logger.warning("[TTS] edge-tts failed (%s)", e)
+
+    # Tier 2 (HF only): espeak-ng local — Indian English male, no network, always available
     if _on_hf:
-        # On HuggingFace: StreamElements "Brian" is PRIMARY — plain HTTPS, always male, always consistent
-        # edge-tts WebSocket to Microsoft is unreliable on HF and causes voice switching mid-response
-        try:
-            import requests as _req
-            _chunks = [text[i:i + 500] for i in range(0, min(len(text), 4000), 500)]
-            _parts = []
-            for _chunk in _chunks:
-                r = _req.get(
-                    "https://api.streamelements.com/kappa/v2/speech",
-                    params={"voice": "Brian", "text": _chunk},
-                    timeout=8,
-                )
-                if r.status_code == 200 and r.content:
-                    _parts.append(r.content)
-                else:
-                    raise RuntimeError(f"StreamElements HTTP {r.status_code}")
-            if _parts:
-                return b"".join(_parts)
-            raise RuntimeError("StreamElements returned no audio")
-        except Exception as e:
-            logger.warning("[TTS] StreamElements failed (%s) — falling back to gTTS", e)
-    else:
-        # On localhost: edge-tts is PRIMARY — en-IN-PrabhatNeural is male Indian voice
-        try:
-            async def _inner():
-                communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
-                parts = []
-                async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        parts.append(chunk["data"])
-                return b"".join(parts)
+        audio = _espeak_male(text)
+        if audio:
+            return audio
 
-            audio = asyncio.run(asyncio.wait_for(_inner(), timeout=10))
-            if audio:
-                return audio
-            raise RuntimeError("edge-tts returned empty audio")
-        except Exception as e:
-            logger.warning("[TTS] edge-tts failed (%s) — falling back to gTTS", e)
-
-    # Fallback: gTTS — Indian English accent, female (last resort only)
+    # Tier 3: gTTS — last resort, female but always works
     try:
         from gtts import gTTS
         import io
