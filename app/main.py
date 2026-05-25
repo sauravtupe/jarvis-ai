@@ -229,12 +229,15 @@ async def lifespan(app: FastAPI):
             logger.error("  - TTS: FAILED — OPENAI_API_KEY not set in environment / HF Secrets")
         else:
             try:
-                _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir, I am ready.", "ash", TTS_RATE)
+                import os as _os_az
+                _azure_ready = bool(_os_az.environ.get("AZURE_SPEECH_KEY") and _os_az.environ.get("AZURE_SPEECH_REGION"))
+                _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir, I am ready.", "en-IN-PrabhatNeural", TTS_RATE)
                 _tts_test_audio = _tts_test_fut.result(timeout=30)
                 if _tts_test_audio:
-                    logger.info("  - TTS: Ready — OpenAI gpt-4o-mini-tts, voice=ash (Indian male, +volume), %d bytes", len(_tts_test_audio))
+                    _engine = "Azure en-IN-PrabhatNeural (Indian male)" if _azure_ready else "OpenAI ash fallback"
+                    logger.info("  - TTS: Ready — %s, +volume, %d bytes", _engine, len(_tts_test_audio))
                 else:
-                    logger.error("  - TTS: FAILED — OpenAI returned empty audio (check API key validity and quota)")
+                    logger.error("  - TTS: FAILED — both Azure and OpenAI returned empty audio")
             except Exception as _tts_e:
                 logger.error("  - TTS: FAILED — %s", _tts_e)
 
@@ -497,6 +500,49 @@ def _boost_volume(mp3_bytes: bytes, gain: float = _TTS_VOLUME_GAIN) -> bytes:
     return mp3_bytes
 
 
+def _azure_tts(text: str, voice: str = "en-IN-PrabhatNeural") -> bytes:
+    """Azure AI Speech REST API — native Indian voices (PrabhatNeural / MadhurNeural).
+
+    Requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION in environment.
+    Returns empty bytes if Azure not configured or fails — caller falls back to OpenAI.
+    """
+    import os as _os, html as _html
+    key = _os.environ.get("AZURE_SPEECH_KEY", "").strip()
+    region = _os.environ.get("AZURE_SPEECH_REGION", "").strip()
+    if not key or not region:
+        return b""
+
+    lang = "hi-IN" if voice.startswith("hi-IN") else "en-IN"
+    rate_pct = "+15%"  # matches OpenAI speed=1.15
+    escaped = _html.escape(text)
+    ssml = (
+        f'<speak version="1.0" xml:lang="{lang}" '
+        f'xmlns="http://www.w3.org/2001/10/synthesis">'
+        f'<voice name="{voice}">'
+        f'<prosody rate="{rate_pct}">{escaped}</prosody>'
+        f'</voice></speak>'
+    )
+
+    endpoint = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    headers = {
+        "Ocp-Apim-Subscription-Key": key,
+        "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+        "User-Agent": "Jarvis-AI",
+    }
+
+    try:
+        import requests as _rq
+        resp = _rq.post(endpoint, headers=headers, data=ssml.encode("utf-8"), timeout=30)
+        if resp.status_code == 200 and resp.content:
+            logger.info("[TTS] Azure %s OK len=%d", voice, len(resp.content))
+            return resp.content
+        logger.warning("[TTS] Azure HTTP %d: %s", resp.status_code, resp.text[:300] if resp.text else "")
+    except Exception as e:
+        logger.warning("[TTS] Azure TTS failed: %s", e)
+    return b""
+
+
 _OPENAI_TTS_INSTRUCTIONS = (
     "Voice: Confident, warm, refined Indian English male — like an educated, intelligent "
     "Indian gentleman from Mumbai or Bengaluru. Think of a polished Indian executive or "
@@ -513,15 +559,22 @@ _OPENAI_TTS_INSTRUCTIONS = (
 
 
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
-    """OpenAI TTS — guaranteed Indian-accented male voice via gpt-4o-mini-tts.
-
-    Single reliable path. The `voice` and `rate` parameters are kept for call-site
-    compatibility but ignored — we always use 'onyx' with Indian-accent instructions.
+    """Two-tier TTS:
+       1. Azure AI Speech with en-IN-PrabhatNeural (user's preferred Indian voice)
+       2. OpenAI gpt-4o-mini-tts with 'ash' as fallback if Azure not configured/fails
+    Result passed through volume boost (+1.8x) before returning.
     """
+    # Tier 1: Azure (native Indian voice — preferred when configured)
+    azure_voice = voice if voice and voice.endswith("Neural") else "en-IN-PrabhatNeural"
+    audio = _azure_tts(text, azure_voice)
+    if audio:
+        return _boost_volume(audio)
+
+    # Tier 2: OpenAI fallback
     import os as _os
     api_key = _os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
-        logger.error("[TTS] OPENAI_API_KEY not set — cannot synthesize audio")
+        logger.error("[TTS] Both Azure and OpenAI unavailable — cannot synthesize audio")
         return b""
 
     try:
@@ -570,8 +623,11 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
 
 
 def _pick_tts_voice(text: str) -> str:
-    """Kept for call-site compatibility — OpenAI always uses 'ash' regardless of input."""
-    return "ash"
+    """Pick Azure voice based on script — Hindi (Devanagari) → MadhurNeural, else PrabhatNeural.
+    Used by Tier 1 (Azure). Tier 2 (OpenAI) ignores this and hardcodes 'ash'."""
+    if any('ऀ' <= c <= 'ॿ' for c in text):
+        return 'hi-IN-MadhurNeural'
+    return 'en-IN-PrabhatNeural'
 
 _tts_pool = ThreadPoolExecutor(max_workers=4)
 
