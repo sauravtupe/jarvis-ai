@@ -229,10 +229,10 @@ async def lifespan(app: FastAPI):
             logger.error("  - TTS: FAILED — OPENAI_API_KEY not set in environment / HF Secrets")
         else:
             try:
-                _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir, I am ready.", "sage", TTS_RATE)
+                _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir, I am ready.", "echo", TTS_RATE)
                 _tts_test_audio = _tts_test_fut.result(timeout=30)
                 if _tts_test_audio:
-                    logger.info("  - TTS: Ready — OpenAI gpt-4o-mini-tts, voice=sage (Indian male), %d bytes", len(_tts_test_audio))
+                    logger.info("  - TTS: Ready — OpenAI gpt-4o-mini-tts, voice=echo (Indian male, +volume), %d bytes", len(_tts_test_audio))
                 else:
                     logger.error("  - TTS: FAILED — OpenAI returned empty audio (check API key validity and quota)")
             except Exception as _tts_e:
@@ -473,6 +473,30 @@ def _merge_short(sentences):
 
     return merged
 
+# Volume boost gain applied to all TTS output via ffmpeg post-processing.
+# 1.8x ≈ +5 dB. Increase if still too quiet, decrease if clipping is audible.
+_TTS_VOLUME_GAIN = 1.8
+
+
+def _boost_volume(mp3_bytes: bytes, gain: float = _TTS_VOLUME_GAIN) -> bytes:
+    """Boost MP3 loudness using ffmpeg. Returns original bytes if ffmpeg fails."""
+    if not mp3_bytes or gain == 1.0:
+        return mp3_bytes
+    try:
+        import subprocess as _sp
+        result = _sp.run(
+            ['ffmpeg', '-i', 'pipe:0', '-filter:a', f'volume={gain}',
+             '-f', 'mp3', '-loglevel', 'quiet', 'pipe:1'],
+            input=mp3_bytes, capture_output=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+        logger.warning("[TTS] volume boost ffmpeg exit %d — returning original", result.returncode)
+    except Exception as e:
+        logger.warning("[TTS] volume boost failed: %s — returning original", e)
+    return mp3_bytes
+
+
 _OPENAI_TTS_INSTRUCTIONS = (
     "Voice: Confident, warm, refined Indian English male — like an educated, intelligent "
     "Indian gentleman from Mumbai or Bengaluru. Think of a polished Indian executive or "
@@ -507,7 +531,7 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         # gpt-4o-mini-tts supports `instructions` to steer accent and tone
         response = client.audio.speech.create(
             model="gpt-4o-mini-tts",
-            voice="sage",
+            voice="echo",
             input=text,
             instructions=_OPENAI_TTS_INSTRUCTIONS,
             response_format="mp3",
@@ -515,7 +539,8 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         )
         audio = response.content
         if audio:
-            logger.info("[TTS] OpenAI gpt-4o-mini-tts OK voice=sage len=%d", len(audio))
+            audio = _boost_volume(audio)
+            logger.info("[TTS] OpenAI gpt-4o-mini-tts OK voice=echo len=%d (volume +%.1fx)", len(audio), _TTS_VOLUME_GAIN)
             return audio
         logger.warning("[TTS] OpenAI gpt-4o-mini-tts returned empty audio — trying tts-1")
     except Exception as e:
@@ -527,14 +552,15 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         client = OpenAI(api_key=api_key, timeout=30.0)
         response = client.audio.speech.create(
             model="tts-1",
-            voice="sage",
+            voice="echo",
             input=text,
             response_format="mp3",
             speed=1.15,
         )
         audio = response.content
         if audio:
-            logger.info("[TTS] OpenAI tts-1 fallback OK voice=sage len=%d", len(audio))
+            audio = _boost_volume(audio)
+            logger.info("[TTS] OpenAI tts-1 fallback OK voice=echo len=%d (volume +%.1fx)", len(audio), _TTS_VOLUME_GAIN)
             return audio
         logger.error("[TTS] OpenAI tts-1 fallback also returned empty audio")
     except Exception as e:
@@ -544,8 +570,8 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
 
 
 def _pick_tts_voice(text: str) -> str:
-    """Kept for call-site compatibility — OpenAI always uses 'sage' regardless of input."""
-    return "sage"
+    """Kept for call-site compatibility — OpenAI always uses 'echo' regardless of input."""
+    return "echo"
 
 _tts_pool = ThreadPoolExecutor(max_workers=4)
 
