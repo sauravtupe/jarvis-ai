@@ -443,10 +443,12 @@ def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
 
     prompt = (
         "Generate exactly 10 multiple choice questions based on this video transcript.\n"
-        "Return ONLY a valid JSON array. Format:\n"
-        '[{"question": "...", "options": ["A", "B", "C", "D"], "correct": 0}, ...]\n'
-        "- options must have exactly 4 strings\n"
-        "- correct is the 0-based index of the correct answer\n"
+        "IMPORTANT: Always write questions and answer options in English, regardless of the transcript language.\n"
+        "Return ONLY a valid JSON array. Example format:\n"
+        '[{"question": "What does observation mean?", "options": ["Using your eyes to look carefully at things", "Listening to someone speak", "Writing notes in a book", "Memorising facts silently"], "correct": 0}, ...]\n'
+        "Rules:\n"
+        "- options must have exactly 4 strings — each a complete answer phrase, NOT a single letter\n"
+        "- correct is the 0-based index of the correct answer (0=first option, 1=second, etc.)\n"
         "- Base questions ONLY on the transcript content\n\n"
         f"Transcript:\n{transcript[:8000]}"
     )
