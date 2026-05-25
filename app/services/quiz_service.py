@@ -7,6 +7,10 @@ from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
+# Version marker — bump when MCQ generation logic changes; helps verify HF deployments
+_QUIZ_GEN_VERSION = "2026-05-26b-english-options"
+logger.info("[QUIZ] quiz_service loaded — generator version: %s", _QUIZ_GEN_VERSION)
+
 _QUIZ_DIR = Path("database/quizzes")
 _quiz_lock = threading.Lock()
 
@@ -528,6 +532,7 @@ def _validate_mcqs(questions: list) -> List[dict]:
 
 
 def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
+    logger.info("[QUIZ] generate_mcqs called (version=%s, transcript=%d chars)", _QUIZ_GEN_VERSION, len(transcript))
     prompt = (
         "Generate exactly 10 multiple choice questions based on the video transcript below.\n\n"
         "===== CRITICAL RULES (read carefully) =====\n"

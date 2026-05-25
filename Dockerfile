@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-# Cache bust — forces full rebuild: 2026-05-26 (OpenAI TTS migration)
-ARG CACHEBUST=20260526
+# Cache bust — forces full rebuild: 2026-05-26-mcq-fix (MCQ English/options fix)
+ARG CACHEBUST=20260526b
 
 WORKDIR /app
 
