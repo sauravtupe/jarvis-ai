@@ -522,27 +522,31 @@ def _piper_male(text: str) -> bytes:
 
 
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
-    import os as _os
-    _on_hf = bool(_os.getenv("SPACE_ID"))
+    import os as _os, subprocess as _sp, tempfile as _tf
 
-    # edge-tts — PrabhatNeural Indian male (same voice as thinking clips)
-    # HF needs a longer timeout than localhost; retry once before giving up
-    async def _edge_inner():
-        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
-        parts = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                parts.append(chunk["data"])
-        return b"".join(parts)
-
-    _timeout = 25 if _on_hf else 15
-    for _attempt in range(2):
-        try:
-            audio = asyncio.run(asyncio.wait_for(_edge_inner(), timeout=_timeout))
+    # Tier 1: edge-tts CLI via subprocess — avoids asyncio/uvicorn event loop conflict
+    # Running edge-tts as a subprocess gives it a clean process with its own event loop
+    tmp = _tf.NamedTemporaryFile(suffix='.mp3', delete=False)
+    tmpfile = tmp.name
+    tmp.close()
+    try:
+        result = _sp.run(
+            ['edge-tts', '--voice', voice, '--rate', rate, '--text', text, '--write-media', tmpfile],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0 and _os.path.getsize(tmpfile) > 0:
+            with open(tmpfile, 'rb') as f:
+                audio = f.read()
             if audio:
                 return audio
-        except Exception as e:
-            logger.warning("[TTS] edge-tts attempt %d failed: %s", _attempt + 1, e)
+        logger.warning("[TTS] edge-tts CLI exit %d: %s", result.returncode, result.stderr[:200])
+    except Exception as e:
+        logger.warning("[TTS] edge-tts CLI failed: %s", e)
+    finally:
+        try:
+            _os.unlink(tmpfile)
+        except OSError:
+            pass
 
     # Tier 2: Piper neural TTS — Indian English male, local, no network needed
     audio = _piper_male(text)
