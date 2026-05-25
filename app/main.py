@@ -471,32 +471,32 @@ def _merge_short(sentences):
 
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
     import os as _os
-    # HuggingFace sets SPACE_ID automatically — edge-tts WebSocket is unreliable there
+    # On HuggingFace use a shorter timeout; localhost can wait longer
     _on_hf = bool(_os.getenv("SPACE_ID"))
+    _edge_timeout = 5 if _on_hf else 10
 
-    if not _on_hf:
-        # Localhost: try edge-tts first (better quality)
-        try:
-            async def _inner():
-                communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
-                parts = []
-                async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        parts.append(chunk["data"])
-                return b"".join(parts)
+    # Always try edge-tts first — en-IN-PrabhatNeural is male Indian voice
+    try:
+        async def _inner():
+            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+            parts = []
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    parts.append(chunk["data"])
+            return b"".join(parts)
 
-            async def _inner_with_timeout():
-                return await asyncio.wait_for(_inner(), timeout=10)
+        async def _inner_with_timeout():
+            return await asyncio.wait_for(_inner(), timeout=_edge_timeout)
 
-            audio = asyncio.run(_inner_with_timeout())
-            if audio:
-                return audio
-            raise RuntimeError("edge-tts returned empty audio")
+        audio = asyncio.run(_inner_with_timeout())
+        if audio:
+            return audio
+        raise RuntimeError("edge-tts returned empty audio")
 
-        except Exception as e:
-            logger.warning("[TTS] edge-tts failed (%s) — falling back to gTTS", e)
+    except Exception as e:
+        logger.warning("[TTS] edge-tts failed (%s) — falling back to gTTS", e)
 
-    # gTTS: plain HTTPS to Google — works from any network including HuggingFace
+    # gTTS fallback: plain HTTPS to Google — works from any network including HuggingFace
     try:
         from gtts import gTTS
         import io
