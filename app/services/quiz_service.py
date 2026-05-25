@@ -437,60 +437,66 @@ def get_transcript(video_id: str) -> str:
         raise ValueError(f"All transcript methods failed. Last error: {assemblyai_err or err}")
 
 
-def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
+def _has_devanagari(s: str) -> bool:
+    return any('ऀ' <= c <= 'ॿ' for c in s or "")
+
+
+def _looks_like_letter_option(s: str) -> bool:
+    """Detects placeholder options like 'A', 'B.', 'Option C', '(D)' — anything that isn't a real answer phrase."""
+    t = (s or "").strip().strip('.').strip(')').strip('(').strip()
+    if len(t) <= 2:
+        return True
+    if re.fullmatch(r'(?:option\s*)?[A-Da-d][\.\):]?', t):
+        return True
+    return False
+
+
+def _call_groq_for_mcqs(prompt: str, groq_api_keys: list, model: str) -> str:
     from langchain_groq import ChatGroq
     from langchain_core.messages import SystemMessage, HumanMessage
-
-    prompt = (
-        "Generate exactly 10 multiple choice questions based on this video transcript.\n"
-        "IMPORTANT: Always write questions and answer options in English, regardless of the transcript language.\n"
-        "Return ONLY a valid JSON array. Example format:\n"
-        '[{"question": "What does observation mean?", "options": ["Using your eyes to look carefully at things", "Listening to someone speak", "Writing notes in a book", "Memorising facts silently"], "correct": 0}, ...]\n'
-        "Rules:\n"
-        "- options must have exactly 4 strings — each a complete answer phrase, NOT a single letter\n"
-        "- correct is the 0-based index of the correct answer (0=first option, 1=second, etc.)\n"
-        "- Base questions ONLY on the transcript content\n\n"
-        f"Transcript:\n{transcript[:8000]}"
-    )
 
     last_err = None
     for key in groq_api_keys:
         try:
             llm = ChatGroq(
                 groq_api_key=key,
-                model_name="llama-3.1-8b-instant",
+                model_name=model,
                 temperature=0.3,
                 max_tokens=4000,
                 request_timeout=60,
             )
             response = llm.invoke([
-                SystemMessage(content="You are an expert quiz generator. Output ONLY valid JSON, no markdown fences, no explanation."),
+                SystemMessage(content=(
+                    "You are an expert quiz generator. Output ONLY valid JSON — no markdown fences, no explanation. "
+                    "Every question and every answer option MUST be written in English only. "
+                    "Each answer option MUST be a full descriptive phrase (5+ words), NEVER a single letter or label like 'A', 'B', 'Option C'."
+                )),
                 HumanMessage(content=prompt),
             ])
-            raw = (response.content or "").strip()
-            break
+            return (response.content or "").strip()
         except Exception as e:
             last_err = e
-            logger.warning("[QUIZ] Key failed for MCQ generation: %s", e)
+            logger.warning("[QUIZ] Key failed for MCQ generation (%s): %s", model, e)
             continue
-    else:
-        raise ValueError(f"All Groq keys exhausted: {last_err}")
+    raise ValueError(f"All Groq keys exhausted: {last_err}")
 
+
+def _parse_mcq_json(raw: str) -> list:
     raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'\s*```$', '', raw, flags=re.MULTILINE).strip()
-
     try:
         questions = json.loads(raw)
     except json.JSONDecodeError:
         m = re.search(r'\[.*\]', raw, re.DOTALL)
-        if m:
-            questions = json.loads(m.group(0))
-        else:
+        if not m:
             raise ValueError("Could not parse MCQ JSON from LLM response")
-
+        questions = json.loads(m.group(0))
     if not isinstance(questions, list):
         raise ValueError("LLM did not return a JSON array")
+    return questions
 
+
+def _validate_mcqs(questions: list) -> List[dict]:
     validated = []
     for q in questions[:10]:
         if not isinstance(q, dict):
@@ -500,15 +506,78 @@ def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
         correct = q.get("correct", 0)
         if not question or not isinstance(options, list) or len(options) < 4:
             continue
+        opts = [str(o).strip() for o in options[:4]]
+        # Reject single-letter / placeholder options
+        if any(_looks_like_letter_option(o) for o in opts):
+            logger.warning("[QUIZ] Rejected question with placeholder options: %r", opts)
+            continue
+        # Reject Hindi/Devanagari content
+        if _has_devanagari(question) or any(_has_devanagari(o) for o in opts):
+            logger.warning("[QUIZ] Rejected non-English question: %r", question[:60])
+            continue
         try:
             correct_idx = int(correct)
         except (TypeError, ValueError):
             correct_idx = 0
         validated.append({
             "question": question,
-            "options": [str(o) for o in options[:4]],
+            "options": opts,
             "correct": max(0, min(3, correct_idx)),
         })
+    return validated
+
+
+def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
+    prompt = (
+        "Generate exactly 10 multiple choice questions based on the video transcript below.\n\n"
+        "===== CRITICAL RULES (read carefully) =====\n"
+        "1. ALL output MUST be in ENGLISH. Even if the transcript is in Hindi, Marathi, or any other language, "
+        "translate the concepts and write every question + option in English.\n"
+        "2. Each 'options' array MUST contain four FULL ANSWER PHRASES (typically 5–15 words each). "
+        "NEVER output single letters like \"A\", \"B\", \"C\", \"D\". NEVER output labels like \"Option A\". "
+        "The letter labels (A/B/C/D) will be added by the UI — you only provide the answer text.\n"
+        "3. Return ONLY a valid JSON array. No markdown fences, no commentary.\n\n"
+        "===== EXAMPLE (follow this exact structure) =====\n"
+        '[\n'
+        '  {\n'
+        '    "question": "According to the video, what does observation mean?",\n'
+        '    "options": [\n'
+        '      "Using your eyes to look carefully at things around you",\n'
+        '      "Listening quietly to other people talking",\n'
+        '      "Writing detailed notes in a personal journal",\n'
+        '      "Memorising facts by reading them many times"\n'
+        '    ],\n'
+        '    "correct": 0\n'
+        '  }\n'
+        ']\n\n'
+        "- 'correct' is the 0-based index of the correct answer (0, 1, 2, or 3).\n"
+        "- Base every question strictly on transcript content.\n\n"
+        f"===== TRANSCRIPT =====\n{transcript[:8000]}"
+    )
+
+    # Try the strong model first; fall back to the fast model if rate-limited
+    raw = ""
+    try:
+        raw = _call_groq_for_mcqs(prompt, groq_api_keys, "llama-3.3-70b-versatile")
+    except Exception as e:
+        logger.warning("[QUIZ] 70B model failed, falling back to 8B: %s", e)
+        raw = _call_groq_for_mcqs(prompt, groq_api_keys, "llama-3.1-8b-instant")
+
+    questions = _parse_mcq_json(raw)
+    validated = _validate_mcqs(questions)
+
+    # Retry once with a stricter prompt if the model produced too many bad questions
+    if len(validated) < 5:
+        logger.warning("[QUIZ] Only %d valid questions — retrying with stricter prompt", len(validated))
+        retry_prompt = (
+            "Your previous output was rejected because options were single letters (A/B/C/D) "
+            "or questions were not in English. Try again.\n\n" + prompt
+        )
+        try:
+            raw2 = _call_groq_for_mcqs(retry_prompt, groq_api_keys, "llama-3.3-70b-versatile")
+            validated = _validate_mcqs(_parse_mcq_json(raw2))
+        except Exception as e:
+            logger.warning("[QUIZ] Retry also failed: %s", e)
 
     if len(validated) < 3:
         raise ValueError("Not enough valid questions generated")
