@@ -223,16 +223,20 @@ async def lifespan(app: FastAPI):
         logger.info("  - Vision (Groq): Ready")
         logger.info("  - Chat Service: Ready")
 
-        # TTS connectivity test — shows in HuggingFace logs which engine is active
-        try:
-            _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir", TTS_VOICE, TTS_RATE)
-            _tts_test_audio = _tts_test_fut.result(timeout=15)
-            if _tts_test_audio:
-                logger.info("  - TTS: Ready — %d bytes (engine=edge-tts or gTTS fallback, voice=%s)", len(_tts_test_audio), TTS_VOICE)
-            else:
-                logger.error("  - TTS: FAILED — both edge-tts and gTTS returned empty audio")
-        except Exception as _tts_e:
-            logger.error("  - TTS: FAILED — %s", _tts_e)
+        # TTS connectivity test — verifies OpenAI key works at startup
+        import os as _os_startup
+        if not _os_startup.environ.get("OPENAI_API_KEY", "").strip():
+            logger.error("  - TTS: FAILED — OPENAI_API_KEY not set in environment / HF Secrets")
+        else:
+            try:
+                _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir, I am ready.", "onyx", TTS_RATE)
+                _tts_test_audio = _tts_test_fut.result(timeout=30)
+                if _tts_test_audio:
+                    logger.info("  - TTS: Ready — OpenAI gpt-4o-mini-tts, voice=onyx (Indian male), %d bytes", len(_tts_test_audio))
+                else:
+                    logger.error("  - TTS: FAILED — OpenAI returned empty audio (check API key validity and quota)")
+            except Exception as _tts_e:
+                logger.error("  - TTS: FAILED — %s", _tts_e)
 
         logger.info("=" * 60)
         logger.info("J.A.R.V.I.S is online and ready!")
@@ -469,120 +473,75 @@ def _merge_short(sentences):
 
     return merged
 
-import threading as _threading
-_piper_voice_obj = None
-_piper_voice_failed = False
-_piper_voice_lock = _threading.Lock()
-
-_PIPER_MODELS = [
-    '/app/models/en_IN-male-medium.onnx',  # Indian English male (preferred)
-    '/app/models/en_US-ryan-high.onnx',    # American English male (fallback)
-]
-
-def _get_piper_voice():
-    global _piper_voice_obj, _piper_voice_failed
-    if _piper_voice_failed:
-        return None
-    if _piper_voice_obj is not None:
-        return _piper_voice_obj
-    with _piper_voice_lock:
-        if _piper_voice_obj is None and not _piper_voice_failed:
-            try:
-                import os
-                from piper.voice import PiperVoice
-                for model in _PIPER_MODELS:
-                    if os.path.exists(model):
-                        _piper_voice_obj = PiperVoice.load(model)
-                        logger.info("[TTS] Piper voice loaded: %s", model)
-                        break
-                if _piper_voice_obj is None:
-                    logger.warning("[TTS] No piper model found in %s", _PIPER_MODELS)
-                    _piper_voice_failed = True
-            except Exception as e:
-                logger.warning("[TTS] Piper init failed: %s", e)
-                _piper_voice_failed = True
-    return _piper_voice_obj
-
-def _piper_male(text: str) -> bytes:
-    """Piper VITS neural TTS — Indian English male, runs 100% locally, no network."""
-    try:
-        import io, wave, subprocess as _sp
-        voice = _get_piper_voice()
-        if voice is None:
-            return b""
-        buf = io.BytesIO()
-        with wave.open(buf, 'wb') as wf:
-            voice.synthesize(text, wf)
-        wav_bytes = buf.getvalue()
-        if not wav_bytes:
-            return b""
-        result = _sp.run(
-            ['ffmpeg', '-i', 'pipe:0', '-f', 'mp3', '-ar', '22050', '-ab', '64k',
-             'pipe:1', '-loglevel', 'quiet'],
-            input=wav_bytes, capture_output=True, timeout=20,
-        )
-        return result.stdout or b""
-    except Exception as e:
-        logger.warning("[TTS] piper failed: %s", e)
-        return b""
+_OPENAI_TTS_INSTRUCTIONS = (
+    "Voice: Confident, warm, refined Indian English male — like an educated, intelligent "
+    "Indian gentleman from Mumbai or Bengaluru. Think of a polished Indian executive or "
+    "professor: calm, clear, respectful, and articulate.\n"
+    "Accent: Natural Indian English — soft retroflex consonants, clear vowels, no fake British "
+    "or American twang. Slight melodic rise-and-fall typical of educated Indian speech.\n"
+    "Tone: Composed, gentlemanly, intelligent. Treat the listener as 'Sir' with quiet respect.\n"
+    "Pace: Natural conversational speed, neither rushed nor slow.\n"
+    "If the text contains Hindi (Devanagari) words or mixed Hinglish, pronounce them naturally "
+    "as a native Hindi speaker — do not Anglicize them."
+)
 
 
 def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
-    import sys as _sys, os as _os, subprocess as _sp, tempfile as _tf
+    """OpenAI TTS — guaranteed Indian-accented male voice via gpt-4o-mini-tts.
 
-    # Tier 1: edge-tts in a fresh Python subprocess (clean event loop, no uvicorn asyncio conflict)
-    # Use sys.executable — always the correct interpreter regardless of PATH
-    tmp = _tf.NamedTemporaryFile(suffix='.mp3', delete=False)
-    tmpfile = tmp.name
-    tmp.close()
-    try:
-        script = (
-            "import asyncio, edge_tts\n"
-            "async def _r():\n"
-            f"    c = edge_tts.Communicate(text={repr(text)}, voice={repr(voice)}, rate={repr(rate)})\n"
-            f"    await c.save({repr(tmpfile)})\n"
-            "asyncio.run(_r())\n"
-        )
-        result = _sp.run([_sys.executable, '-c', script], capture_output=True, timeout=30)
-        if result.returncode == 0 and _os.path.getsize(tmpfile) > 0:
-            with open(tmpfile, 'rb') as f:
-                audio = f.read()
-            if audio:
-                logger.info("[TTS] edge-tts OK voice=%s len=%d", voice, len(audio))
-                return audio
-        logger.warning("[TTS] edge-tts subprocess exit %d: %s", result.returncode, result.stderr[-300:])
-    except Exception as e:
-        logger.warning("[TTS] edge-tts subprocess failed: %s", e)
-    finally:
-        try:
-            _os.unlink(tmpfile)
-        except OSError:
-            pass
-
-    # Tier 2: Piper neural TTS — Indian English male, local, no network needed
-    audio = _piper_male(text)
-    if audio:
-        return audio
-
-    # Tier 3: gTTS — last resort (natural female Indian English)
-    try:
-        from gtts import gTTS
-        import io
-        tts = gTTS(text=text, lang="en", tld="co.in")
-        buf = io.BytesIO()
-        tts.write_to_fp(buf)
-        audio = buf.getvalue()
-        if audio:
-            return audio
-        raise RuntimeError("gTTS returned empty bytes")
-    except Exception as e:
-        logger.error("[TTS] gTTS also failed: %s", e)
+    Single reliable path. The `voice` and `rate` parameters are kept for call-site
+    compatibility but ignored — we always use 'onyx' with Indian-accent instructions.
+    """
+    import os as _os
+    api_key = _os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        logger.error("[TTS] OPENAI_API_KEY not set — cannot synthesize audio")
         return b""
 
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, timeout=30.0)
+
+        # gpt-4o-mini-tts supports `instructions` to steer accent and tone
+        response = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="onyx",
+            input=text,
+            instructions=_OPENAI_TTS_INSTRUCTIONS,
+            response_format="mp3",
+        )
+        audio = response.content
+        if audio:
+            logger.info("[TTS] OpenAI gpt-4o-mini-tts OK voice=onyx len=%d", len(audio))
+            return audio
+        logger.warning("[TTS] OpenAI gpt-4o-mini-tts returned empty audio — trying tts-1")
+    except Exception as e:
+        logger.warning("[TTS] OpenAI gpt-4o-mini-tts failed: %s — trying tts-1", e)
+
+    # Fallback: standard tts-1 (no instructions, but still male onyx voice)
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, timeout=30.0)
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=text,
+            response_format="mp3",
+        )
+        audio = response.content
+        if audio:
+            logger.info("[TTS] OpenAI tts-1 fallback OK voice=onyx len=%d", len(audio))
+            return audio
+        logger.error("[TTS] OpenAI tts-1 fallback also returned empty audio")
+    except Exception as e:
+        logger.error("[TTS] OpenAI tts-1 fallback failed: %s", e)
+
+    return b""
+
+
 def _pick_tts_voice(text: str) -> str:
-    if any('ऀ' <= c <= 'ॿ' for c in text):
-        return 'hi-IN-MadhurNeural'
-    return TTS_VOICE
+    """Kept for call-site compatibility — OpenAI always uses 'onyx' regardless of input."""
+    return "onyx"
 
 _tts_pool = ThreadPoolExecutor(max_workers=4)
 
