@@ -469,27 +469,55 @@ def _merge_short(sentences):
 
     return merged
 
-def _espeak_male(text: str) -> bytes:
-    """Local espeak-ng → ffmpeg pipeline. Male Indian English, no network needed."""
-    import subprocess as _sp
+import threading as _threading
+_piper_voice_obj = None
+_piper_voice_failed = False
+_piper_voice_lock = _threading.Lock()
+
+def _get_piper_voice():
+    global _piper_voice_obj, _piper_voice_failed
+    if _piper_voice_failed:
+        return None
+    if _piper_voice_obj is not None:
+        return _piper_voice_obj
+    with _piper_voice_lock:
+        if _piper_voice_obj is None and not _piper_voice_failed:
+            try:
+                import os
+                from piper.voice import PiperVoice
+                model = '/app/models/en_IN-male-medium.onnx'
+                if os.path.exists(model):
+                    _piper_voice_obj = PiperVoice.load(model)
+                    logger.info("[TTS] Piper Indian English male voice loaded")
+                else:
+                    logger.warning("[TTS] Piper model not found at %s", model)
+                    _piper_voice_failed = True
+            except Exception as e:
+                logger.warning("[TTS] Piper init failed: %s", e)
+                _piper_voice_failed = True
+    return _piper_voice_obj
+
+def _piper_male(text: str) -> bytes:
+    """Piper VITS neural TTS — Indian English male, runs 100% locally, no network."""
     try:
-        espeak = _sp.Popen(
-            ['espeak-ng', '-v', 'en-IN', '-s', '145', '-p', '55', '--stdout'],
-            stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.DEVNULL,
-        )
-        ffmpeg = _sp.Popen(
+        import io, wave, subprocess as _sp
+        voice = _get_piper_voice()
+        if voice is None:
+            return b""
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            voice.synthesize(text, wf)
+        wav_bytes = buf.getvalue()
+        if not wav_bytes:
+            return b""
+        result = _sp.run(
             ['ffmpeg', '-i', 'pipe:0', '-f', 'mp3', '-ar', '22050', '-ab', '64k',
              'pipe:1', '-loglevel', 'quiet'],
-            stdin=espeak.stdout, stdout=_sp.PIPE, stderr=_sp.DEVNULL,
+            input=wav_bytes, capture_output=True, timeout=20,
         )
-        espeak.stdout.close()
-        espeak.stdin.write(text.encode('utf-8'))
-        espeak.stdin.close()
-        mp3, _ = ffmpeg.communicate(timeout=20)
-        espeak.wait()
-        return mp3 or b""
+        return result.stdout or b""
     except Exception as e:
-        logger.warning("[TTS] espeak-ng failed: %s", e)
+        logger.warning("[TTS] piper failed: %s", e)
         return b""
 
 
@@ -516,7 +544,12 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         except Exception as e:
             logger.warning("[TTS] edge-tts attempt %d failed: %s", _attempt + 1, e)
 
-    # Last resort: gTTS Indian English — natural-sounding (female) when edge-tts is down
+    # Tier 2: Piper neural TTS — Indian English male, local, no network needed
+    audio = _piper_male(text)
+    if audio:
+        return audio
+
+    # Tier 3: gTTS — last resort (natural female Indian English)
     try:
         from gtts import gTTS
         import io

@@ -19,6 +19,16 @@ COPY requirements.txt .
 # Install remaining dependencies (torch already installed above)
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download Piper Indian English male neural voice model (~63MB, runs offline at runtime)
+RUN python -c "\
+import urllib.request, os; \
+os.makedirs('/app/models', exist_ok=True); \
+base='https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_IN/male/medium'; \
+urllib.request.urlretrieve(base+'/en_IN-male-medium.onnx', '/app/models/en_IN-male-medium.onnx'); \
+urllib.request.urlretrieve(base+'/en_IN-male-medium.onnx.json', '/app/models/en_IN-male-medium.onnx.json'); \
+print('[OK] Piper en_IN male model ready') \
+" || echo "[WARN] Piper model download failed — will fall back to gTTS"
+
 COPY . .
 
 # Create required directories
