@@ -8,7 +8,7 @@ from typing import Optional, List
 logger = logging.getLogger(__name__)
 
 # Version marker — bump when MCQ generation logic changes; helps verify HF deployments
-_QUIZ_GEN_VERSION = "2026-05-26b-english-options"
+_QUIZ_GEN_VERSION = "2026-05-26c-match-transcript-language"
 logger.info("[QUIZ] quiz_service loaded — generator version: %s", _QUIZ_GEN_VERSION)
 
 _QUIZ_DIR = Path("database/quizzes")
@@ -441,10 +441,6 @@ def get_transcript(video_id: str) -> str:
         raise ValueError(f"All transcript methods failed. Last error: {assemblyai_err or err}")
 
 
-def _has_devanagari(s: str) -> bool:
-    return any('ऀ' <= c <= 'ॿ' for c in s or "")
-
-
 def _looks_like_letter_option(s: str) -> bool:
     """Detects placeholder options like 'A', 'B.', 'Option C', '(D)' — anything that isn't a real answer phrase."""
     t = (s or "").strip().strip('.').strip(')').strip('(').strip()
@@ -472,7 +468,8 @@ def _call_groq_for_mcqs(prompt: str, groq_api_keys: list, model: str) -> str:
             response = llm.invoke([
                 SystemMessage(content=(
                     "You are an expert quiz generator. Output ONLY valid JSON — no markdown fences, no explanation. "
-                    "Every question and every answer option MUST be written in English only. "
+                    "Write questions and answer options in the SAME language as the video transcript "
+                    "(Hindi transcript → Hindi MCQs; English transcript → English MCQs). "
                     "Each answer option MUST be a full descriptive phrase (5+ words), NEVER a single letter or label like 'A', 'B', 'Option C'."
                 )),
                 HumanMessage(content=prompt),
@@ -511,13 +508,9 @@ def _validate_mcqs(questions: list) -> List[dict]:
         if not question or not isinstance(options, list) or len(options) < 4:
             continue
         opts = [str(o).strip() for o in options[:4]]
-        # Reject single-letter / placeholder options
+        # Reject single-letter / placeholder options (language-agnostic — works for any script)
         if any(_looks_like_letter_option(o) for o in opts):
             logger.warning("[QUIZ] Rejected question with placeholder options: %r", opts)
-            continue
-        # Reject Hindi/Devanagari content
-        if _has_devanagari(question) or any(_has_devanagari(o) for o in opts):
-            logger.warning("[QUIZ] Rejected non-English question: %r", question[:60])
             continue
         try:
             correct_idx = int(correct)
@@ -536,13 +529,14 @@ def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
     prompt = (
         "Generate exactly 10 multiple choice questions based on the video transcript below.\n\n"
         "===== CRITICAL RULES (read carefully) =====\n"
-        "1. ALL output MUST be in ENGLISH. Even if the transcript is in Hindi, Marathi, or any other language, "
-        "translate the concepts and write every question + option in English.\n"
-        "2. Each 'options' array MUST contain four FULL ANSWER PHRASES (typically 5–15 words each). "
-        "NEVER output single letters like \"A\", \"B\", \"C\", \"D\". NEVER output labels like \"Option A\". "
+        "1. MATCH THE TRANSCRIPT LANGUAGE. If the transcript is in Hindi (Devanagari script), write the questions "
+        "and all four options in Hindi. If the transcript is in English, write everything in English. "
+        "If the transcript mixes languages (e.g. Hinglish), use the dominant language. Never translate — preserve the original language.\n"
+        "2. Each 'options' array MUST contain four FULL ANSWER PHRASES (typically 5–15 words each in the transcript's language). "
+        "NEVER output single letters like \"A\", \"B\", \"C\", \"D\". NEVER output labels like \"Option A\" / \"विकल्प A\". "
         "The letter labels (A/B/C/D) will be added by the UI — you only provide the answer text.\n"
         "3. Return ONLY a valid JSON array. No markdown fences, no commentary.\n\n"
-        "===== EXAMPLE (follow this exact structure) =====\n"
+        "===== EXAMPLE for an ENGLISH transcript =====\n"
         '[\n'
         '  {\n'
         '    "question": "According to the video, what does observation mean?",\n'
@@ -551,6 +545,19 @@ def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
         '      "Listening quietly to other people talking",\n'
         '      "Writing detailed notes in a personal journal",\n'
         '      "Memorising facts by reading them many times"\n'
+        '    ],\n'
+        '    "correct": 0\n'
+        '  }\n'
+        ']\n\n'
+        "===== EXAMPLE for a HINDI transcript =====\n"
+        '[\n'
+        '  {\n'
+        '    "question": "वीडियो के अनुसार observation का क्या मतलब है?",\n'
+        '    "options": [\n'
+        '      "अपनी आँखों से चीज़ों को ध्यान से देखना",\n'
+        '      "दूसरे लोगों की बातें चुपचाप सुनना",\n'
+        '      "एक डायरी में विस्तार से नोट्स लिखना",\n'
+        '      "बार-बार पढ़कर तथ्य याद करना"\n'
         '    ],\n'
         '    "correct": 0\n'
         '  }\n'
@@ -575,8 +582,10 @@ def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
     if len(validated) < 5:
         logger.warning("[QUIZ] Only %d valid questions — retrying with stricter prompt", len(validated))
         retry_prompt = (
-            "Your previous output was rejected because options were single letters (A/B/C/D) "
-            "or questions were not in English. Try again.\n\n" + prompt
+            "Your previous output was rejected because answer options were single letters (A/B/C/D) "
+            "or short placeholders instead of full descriptive phrases. Try again. "
+            "Remember: match the transcript's language and write each option as a complete answer.\n\n"
+            + prompt
         )
         try:
             raw2 = _call_groq_for_mcqs(retry_prompt, groq_api_keys, "llama-3.3-70b-versatile")
