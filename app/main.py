@@ -478,7 +478,7 @@ def _merge_short(sentences):
 
 # Volume boost gain applied to all TTS output via ffmpeg post-processing.
 # 1.8x ≈ +5 dB. Increase if still too quiet, decrease if clipping is audible.
-_TTS_VOLUME_GAIN = 1.8
+_TTS_VOLUME_GAIN = 1.0
 
 
 def _boost_volume(mp3_bytes: bytes, gain: float = _TTS_VOLUME_GAIN) -> bytes:
