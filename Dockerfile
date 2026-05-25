@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+# Cache bust — forces full rebuild: 2026-05-25
+ARG CACHEBUST=20260525
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
