@@ -38,6 +38,47 @@ function _onJarvisSpeechEnd() {
     _jarvisSpeaking = false;
     maybeRestartListening();
 }
+
+// True while the user is watching a YouTube lecture/video. The video's audio
+// plays through the speakers and the microphone picks it up; without this
+// guard, every spoken word from the video is transcribed and sent to Jarvis,
+// creating a feedback loop. Resumes when the user signals "done" (via the
+// interactive_choice event) or manually clicks the mic.
+let _videoWatchMode = false;
+let _autoListenBeforeVideo = false;
+
+function _enterVideoWatchMode() {
+    if (_videoWatchMode) return;
+    _videoWatchMode = true;
+    _autoListenBeforeVideo = autoListenMode;
+    autoListenMode = false;
+    if (isListening) {
+        try { recognition && recognition.stop(); } catch (_) {}
+    }
+    if (typeof micBtn !== 'undefined' && micBtn) {
+        micBtn.classList.remove('auto-listen', 'listening');
+        micBtn.title = 'Voice paused while a video is open — say "done" or click to resume';
+    }
+    if (typeof showToast === 'function') {
+        showToast('🎬 Voice paused while you watch the video. Say "done" when finished — or click the mic to talk now.', 7000);
+    }
+}
+
+function _exitVideoWatchMode() {
+    if (!_videoWatchMode) return;
+    _videoWatchMode = false;
+    if (_autoListenBeforeVideo) {
+        autoListenMode = true;
+        _autoListenBeforeVideo = false;
+        if (typeof micBtn !== 'undefined' && micBtn) {
+            micBtn.classList.add('auto-listen');
+            micBtn.title = 'Voice input — click to stop auto-listen';
+        }
+        maybeRestartListening();
+    } else if (typeof micBtn !== 'undefined' && micBtn) {
+        micBtn.title = 'Voice input';
+    }
+}
 let _ttsAudio = null;   // dedicated pre-unlocked element for inline TTS playback
 const SETTINGS_KEY = 'jarvis_settings';
 const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true };
@@ -656,6 +697,12 @@ function initSpeech() {
             if (speechWidgetText) speechWidgetText.textContent = '';
             return;
         }
+        // Drop anything captured while a YouTube lecture is open — the video's audio
+        // leaks through the speakers and the mic transcribes it as fake user input.
+        if (_videoWatchMode) {
+            if (speechWidgetText) speechWidgetText.textContent = '';
+            return;
+        }
         const last = e.results[e.results.length - 1];
         // Pick the longest alternative transcript
         let transcript = '';
@@ -786,11 +833,14 @@ function maybeRestartListening() {
     // Never restart while Jarvis is speaking — mic would capture Jarvis's own voice.
     // _onJarvisSpeechEnd() calls this function again once TTS finishes.
     if (_jarvisSpeaking) return;
+    // Never restart while a YouTube lecture is open — _exitVideoWatchMode() calls
+    // this function again once the user signals "done".
+    if (_videoWatchMode) return;
     const ttsActive = ttsPlayer && (ttsPlayer.playing || ttsPlayer.queue.length > 0);
     if (ttsActive) return;
     if (!autoListenMode) return;
     setTimeout(() => {
-        if (autoListenMode && !isStreaming && !isListening && recognition && !_jarvisSpeaking) {
+        if (autoListenMode && !isStreaming && !isListening && recognition && !_jarvisSpeaking && !_videoWatchMode) {
             startListening();
         }
     }, SPEECH_RESTART_DELAY_MS);
@@ -1337,6 +1387,13 @@ function bindEvents() {
     });
     initCameraPanel();
     if (micBtn) micBtn.addEventListener('click', () => {
+        // Manual override: if mic is paused because a video is being watched,
+        // a click is an explicit "I'm ready to talk now" signal — exit watch mode.
+        if (_videoWatchMode) {
+            _autoListenBeforeVideo = true; // ensure exit restarts mic
+            _exitVideoWatchMode();
+            return;
+        }
         if (isListening) {
             autoListenMode = false;
             stopListening();
@@ -1445,6 +1502,11 @@ function newChat() {
     sessionId = null;
     pendingYouTube = null;
     currentQuiz = null;
+    // Clear video-watch mode so the new chat starts with a clean mic state
+    if (_videoWatchMode) {
+        _videoWatchMode = false;
+        _autoListenBeforeVideo = false;
+    }
     if (chatMessages) chatMessages.innerHTML = '';
     chatMessages.appendChild(createWelcome());
     messageInput.value = '';
@@ -1872,9 +1934,14 @@ async function sendMessage(textOverride) {
                     }
                     if (data.youtube_detected) {
                         pendingYouTube = { video_id: data.youtube_detected.video_id, url: data.youtube_detected.url };
+                        // Pause speech recognition — the video's audio leaks through the speakers
+                        // and the mic would otherwise transcribe it as user input (loop).
+                        _enterVideoWatchMode();
                         window.open(data.youtube_detected.url, '_blank');
                     }
                     if (data.interactive_choice && data.interactive_choice.type === 'youtube_analysis') {
+                        // User signalled "done" — server acknowledged. Resume mic if it was on.
+                        _exitVideoWatchMode();
                         renderYouTubeChoiceButtons(data.interactive_choice.video_id, contentEl);
                     }
                     if (data.practice_files) {
