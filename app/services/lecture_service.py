@@ -27,7 +27,7 @@ logger = logging.getLogger("J.A.R.V.I.S")
 
 _lock = threading.Lock()
 _CHAPTER_MIN = 1
-_CHAPTER_MAX = 30
+_CHAPTER_MAX = 80
 
 # ─── Catalog persistence ────────────────────────────────────────────────────
 
@@ -48,12 +48,23 @@ def _load_catalog() -> dict:
 
 
 def _atomic_write(data: dict) -> None:
-    """Write the catalog atomically (write to tmp, then rename)."""
+    """Write the catalog atomically (write to tmp, then rename) and sync to S3.
+
+    The S3 sync is best-effort — failure is logged but does not block the
+    local write. Containers on HF Spaces are ephemeral, so the S3 copy is
+    what makes the catalog survive deploys / restarts.
+    """
     LECTURES_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = LECTURES_JSON_PATH.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, LECTURES_JSON_PATH)
+    try:
+        from app.services.storage_service import upload_bytes_to_s3
+        payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+        upload_bytes_to_s3(payload, "lectures/lectures.json", content_type="application/json")
+    except Exception as e:
+        logger.warning("[LECTURE] S3 sync of lectures.json failed: %s", e)
 
 
 def _save_catalog(data: dict) -> None:
@@ -291,9 +302,11 @@ def extract_chapter_from_message(text: str) -> Optional[int]:
     return None
 
 
-# Gate regex — fast check that the text mentions both "class" and "chapter/lesson/lecture".
+# Gate regex — fast check that the text mentions both a class keyword AND a chapter keyword.
 # Runs BEFORE the heavier extractors. Avoids false positives on unrelated messages.
-_CLASS_WORD_RE = re.compile(r"\b(class|std|standard|grade)\b", re.IGNORECASE)
+# NOTE: "UKG" and "kindergarten" are themselves class identifiers — they don't need a
+# preceding "class" word ("UKG chapter 1" is valid and means class=UKG, chapter=1).
+_CLASS_WORD_RE = re.compile(r"\b(class|std|standard|grade|UKG|kindergarten)\b", re.IGNORECASE)
 _CHAPTER_WORD_RE = re.compile(r"\b(chapter|lesson|lecture)\b", re.IGNORECASE)
 
 

@@ -82,7 +82,7 @@ class AdminLoginRequest(BaseModel):
 
 class LectureCreate(BaseModel):
     class_name: str = Field(..., pattern=r'^(class_(1[0-2]|[1-9])|UKG)$')
-    chapter: int = Field(..., ge=1, le=30)
+    chapter: int = Field(..., ge=1, le=80)
     title: str = Field(..., min_length=1, max_length=120)
     youtube_url: str = Field(..., min_length=1)
 

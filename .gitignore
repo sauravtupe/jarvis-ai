@@ -11,6 +11,8 @@ build/
 database/vector_store/
 database/chats_data/
 database/camera_captures/
+database/lectures.json
+database/quizzes/records.json
 *.mp3
 *.wav
 server_stdout.txt

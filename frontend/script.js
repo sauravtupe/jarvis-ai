@@ -2672,7 +2672,7 @@ async function _saveLectureForm() {
     // Client-side validation (mirrors backend)
     if (!cls) return setErr('Please choose a class.');
     const ch = parseInt(chRaw, 10);
-    if (!ch || ch < 1 || ch > 30) return setErr('Chapter must be a number between 1 and 30.');
+    if (!ch || ch < 1 || ch > 80) return setErr('Chapter must be a number between 1 and 80.');
     if (!titleVal) return setErr('Title is required.');
     if (titleVal.length > 120) return setErr('Title must be 120 characters or fewer.');
     if (!_YT_RE.test(urlVal)) return setErr('Please enter a valid YouTube URL.');

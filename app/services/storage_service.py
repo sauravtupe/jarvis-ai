@@ -167,6 +167,16 @@ def _startup_restore_from_s3_inner() -> None:
             logger.info("[STORAGE] Restored quizzes/records.json from S3")
             restored += 1
 
+    # 3b. Lecture catalog (Feature 8)
+    from config import LECTURES_JSON_PATH
+    LECTURES_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not LECTURES_JSON_PATH.exists():
+        data = download_from_s3("lectures/lectures.json")
+        if data:
+            LECTURES_JSON_PATH.write_bytes(data)
+            logger.info("[STORAGE] Restored lectures/lectures.json from S3 (%d bytes)", len(data))
+            restored += 1
+
     # 4. Chat sessions
     s3_keys = list_s3_prefix("chats/")
     for key in s3_keys:
