@@ -274,31 +274,64 @@ def _normalize_hindi_keywords(text: str) -> str:
     return out
 
 
-# Only matches "chapter N" / "lesson N" / "lecture N" (keyword BEFORE the number).
-# The reverse pattern ("5 chapter") is intentionally NOT supported — it would
-# clash with "class 5 chapter 3" where "5" belongs to the class.
-_CHAPTER_RE = re.compile(
-    r"\b(?:chapter|lesson|lecture)\s*(\d{1,2})\b",
-    re.IGNORECASE,
-)
+# English ordinals → digits. Allows commands like "first lecture" / "5th chapter".
+_ORDINAL_WORDS = {
+    "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
+    "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10",
+    "eleventh": "11", "twelfth": "12",
+}
 
 
-def extract_chapter_from_message(text: str) -> Optional[int]:
-    """Returns the chapter number found in text (e.g. "chapter 3" -> 3), or None.
+def _normalize_ordinals(text: str) -> str:
+    out = text or ""
+    for word, digit in _ORDINAL_WORDS.items():
+        out = re.sub(rf"\b{word}\b", digit, out, flags=re.IGNORECASE)
+    # Also strip 1st / 2nd / 3rd / 4th suffixes so "1st chapter" parses cleanly.
+    out = re.sub(r"\b(\d{1,2})(?:st|nd|rd|th)\b", r"\1", out, flags=re.IGNORECASE)
+    return out
 
-    Hindi/Devanagari input is normalised first so the same regex works for
-    "चैप्टर 3" / "अध्याय 3" / "chapter 3" / "lecture 3".
+
+def _strip_class_portion(text: str) -> str:
+    """Remove the class word + its number from text.
+
+    Needed so the chapter extractor doesn't mistake the class number for the
+    chapter number — e.g. in "class 5 chapter 3", without removing "class 5"
+    the pattern "N chapter" would match "5 chapter" → chapter=5 (wrong).
     """
-    normalised = _normalize_number_words(_normalize_hindi_keywords(text or ""))
-    m = _CHAPTER_RE.search(normalised)
-    if not m:
-        return None
-    try:
-        n = int(m.group(1))
-        if _CHAPTER_MIN <= n <= _CHAPTER_MAX:
-            return n
-    except (ValueError, TypeError):
-        pass
+    out = re.sub(r"\b(UKG|kindergarten)\b", "", text or "", flags=re.IGNORECASE)
+    out = re.sub(r"\b(class|std|standard|grade)\s*\d{1,2}\b", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\b\d{1,2}\s*(class|grade|std|standard)\b", "", out, flags=re.IGNORECASE)
+    return out
+
+
+# Accepts BOTH word orders:
+#   "chapter 3" / "lesson 3" / "lecture 3"     (keyword before number)
+#   "3 chapter" / "3 lesson" / "3 lecture"     (number before keyword — for "first lecture" style)
+# The "N keyword" form is only safe AFTER class portion has been stripped from the text.
+_CHAPTER_AFTER_RE = re.compile(r"\b(?:chapter|lesson|lecture)\s*(\d{1,2})\b", re.IGNORECASE)
+_CHAPTER_BEFORE_RE = re.compile(r"\b(\d{1,2})\s*(?:chapter|lesson|lecture)\b", re.IGNORECASE)
+
+
+def extract_chapter_from_message(text: str, strip_class: bool = True) -> Optional[int]:
+    """Returns the chapter number found in text, or None.
+
+    By default the class portion (e.g. "class 5", "UKG") is stripped first so
+    the "N chapter" pattern doesn't mistakenly grab the class number.
+    """
+    normalised = _normalize_ordinals(
+        _normalize_number_words(_normalize_hindi_keywords(text or ""))
+    )
+    search_text = _strip_class_portion(normalised) if strip_class else normalised
+
+    for pattern in (_CHAPTER_AFTER_RE, _CHAPTER_BEFORE_RE):
+        m = pattern.search(search_text)
+        if m:
+            try:
+                n = int(m.group(1))
+                if _CHAPTER_MIN <= n <= _CHAPTER_MAX:
+                    return n
+            except (ValueError, TypeError):
+                continue
     return None
 
 
