@@ -25,6 +25,10 @@ PRACTICE_CLASSES = ["UKG"] + [f"class_{i}" for i in range(1, 13)]
 for _cls in PRACTICE_CLASSES:
     (PRACTICE_PDFS_DIR / _cls).mkdir(parents=True, exist_ok=True)
 
+# Lecture catalog (Feature 8) — JSON store, managed via admin API
+LECTURES_JSON_PATH = BASE_DIR / "database" / "lectures.json"
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
 
 # AWS S3 (Feature 3)

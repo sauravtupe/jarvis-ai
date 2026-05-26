@@ -27,9 +27,10 @@ Use `user_id = 'test-user-001'` as placeholder everywhere user data is saved. Wh
 | FAISS memory | Working |
 | Google Auth | Skipped — build last |
 | Cloud storage | Not built |
-| PDF/Image upload | Not built |
-| YouTube MCQ | Not built |
+| PDF/Image upload | Working |
+| YouTube MCQ | Working (English + Hindi MCQs, transcript fallback chain) |
 | Classroom AI | Not built |
+| Lecture Catalog + Admin Panel | Not built |
 | 3D UI + Avatar | Not built |
 
 ---
@@ -45,6 +46,7 @@ Use `user_id = 'test-user-001'` as placeholder everywhere user data is saved. Wh
 | 5 | 3D UI Redesign (Frontend Only) | [.claude/features/feature5_3d_ui.md](.claude/features/feature5_3d_ui.md) |
 | 6 | Animated AI Avatar (Frontend Only) | [.claude/features/feature6_avatar.md](.claude/features/feature6_avatar.md) |
 | 7 | Google Auth + Supabase (LAST) | [.claude/features/feature7_auth.md](.claude/features/feature7_auth.md) |
+| 8 | Lecture Catalog + Admin Panel + Voice Commands | [.claude/features/feature8_lecture_catalog.md](.claude/features/feature8_lecture_catalog.md) |
 
 **Before starting any feature: open its detail file and read it fully.**
 
@@ -126,6 +128,11 @@ User message → brain_service (classify intent)
 
 Always use `/chat/jarvis/stream` as the single main endpoint — never call mode-specific endpoints directly from the frontend.
 
+**Pre-brain shortcuts** in `chat_service.process_message_stream()` run *before* brain routing and short-circuit the flow for known patterns:
+- **YouTube URL detection** — if the user pastes a YouTube link, set `pending_youtube` + yield `_youtube_detected`, skip brain.
+- **Lecture command** *(Feature 8)* — if the message matches `match_lecture_command()` (e.g. *"open class 5 chapter 3"* or *"क्लास 5 चैप्टर 3 खोलो"*), look up `database/lectures.json` and fall through into the same YouTube flow. Brain is never invoked.
+- **Practice PDF** — if the message contains `practice/worksheet/study material` keywords, run class extraction and serve PDFs, skip brain.
+
 ### Personal Memory
 
 On startup, `vector_store.py` loads all `.txt` files from `database/learning_data/`, chunks them (1000 chars, 200 overlap), and builds a FAISS index using local HuggingFace embeddings. Top-5 relevant chunks are injected into LLM context per message. Past conversation history is also indexed. The index persists in `database/vector_store/`.
@@ -151,6 +158,10 @@ TTS is generated via `edge-tts` and returned as base64 audio chunks over SSE alo
 | GET | `/chat/history/{session_id}` | Session chat history |
 | GET | `/tasks/{task_id}` | Background task status |
 | POST | `/tts` | Text-to-speech MP3 stream |
+| POST | `/quiz/generate` | YouTube → MCQ quiz (10 questions, matches transcript language) |
+| POST | `/quiz/summary` | YouTube → structured summary |
+| POST | `/admin/login` | *(Feature 8)* Verify `ADMIN_TOKEN`, returns `{ok}` or 401 |
+| GET/POST/PUT/DELETE | `/lectures(/...)` | *(Feature 8)* Lecture catalog CRUD — **admin-only** via `X-Admin-Token` header |
 
 **Main request body:** `{ message, session_id, imgbase64 (optional), tts (bool) }`
 
@@ -180,6 +191,11 @@ AWS_REGION=ap-south-1
 
 # TO ADD (Feature 4)
 OPENAI_API_KEY=           # GPT-4o classroom vision only
+
+# TO ADD (Feature 8 — Lecture Catalog Admin)
+ADMIN_TOKEN=              # Long random string (32+ chars). Owner-only access to /lectures CRUD.
+                          # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
+                          # Set as HF Space Secret. If unset, admin endpoints return 503 (disabled).
 
 # ADD LAST (Feature 7 — auth)
 SUPABASE_URL=

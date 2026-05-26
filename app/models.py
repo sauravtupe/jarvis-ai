@@ -73,3 +73,35 @@ class PracticeListResponse(BaseModel):
     class_name: str
     files: List[PracticeFile]
     count: int
+
+
+# Feature 8 — Lecture Catalog + Admin Panel
+class AdminLoginRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=512)
+
+
+class LectureCreate(BaseModel):
+    class_name: str = Field(..., pattern=r'^(class_(1[0-2]|[1-9])|UKG)$')
+    chapter: int = Field(..., ge=1, le=30)
+    title: str = Field(..., min_length=1, max_length=120)
+    youtube_url: str = Field(..., min_length=1)
+
+
+class LectureUpdate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+    youtube_url: str = Field(..., min_length=1)
+
+
+class LectureRecord(BaseModel):
+    class_name: str
+    chapter: int
+    title: str
+    youtube_url: str
+    video_id: str
+    created_at: str
+    updated_at: str
+
+
+class LectureListResponse(BaseModel):
+    lectures: List[LectureRecord]
+    count: int

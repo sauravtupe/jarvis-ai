@@ -1423,9 +1423,11 @@ function autoResizeInput() {
 
 function updatePanelOverlay() {
     if (!panelOverlay) return;
+    const lecturesPanel = $('lectures-panel');
     const anyOpen = (activityPanel && activityPanel.classList.contains('open')) ||
         (searchResultsWidget && searchResultsWidget.classList.contains('open')) ||
-        (settingsPanel && settingsPanel.classList.contains('open'));
+        (settingsPanel && settingsPanel.classList.contains('open')) ||
+        (lecturesPanel && lecturesPanel.classList.contains('open'));
     panelOverlay.classList.toggle('visible', !!anyOpen);
 }
 
@@ -2391,6 +2393,367 @@ function renderMarkdown(text) {
     html = html.replace(/\n\n/g, '<br><br>').replace(/\n/g, '<br>');
     return html;
 }
+
+// ─── Feature 8 — Lecture Catalog (admin only) ───────────────────────────────
+const ADMIN_TOKEN_KEY = 'jarvis_admin_token';
+
+function _getAdminToken() {
+    try { return localStorage.getItem(ADMIN_TOKEN_KEY) || ''; } catch (_) { return ''; }
+}
+function _setAdminToken(t) {
+    try {
+        if (t) localStorage.setItem(ADMIN_TOKEN_KEY, t);
+        else localStorage.removeItem(ADMIN_TOKEN_KEY);
+    } catch (_) {}
+}
+
+async function _adminFetch(path, opts = {}) {
+    const token = _getAdminToken();
+    const headers = { ...(opts.headers || {}) };
+    if (token) headers['X-Admin-Token'] = token;
+    if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    const res = await fetch(`${API}${path}`, { ...opts, headers });
+    if (res.status === 401) {
+        // Stale or wrong token — clear it and hide the admin UI
+        _setAdminToken('');
+        _updateAdminUI(false);
+    }
+    return res;
+}
+
+function _updateAdminUI(signedIn) {
+    const btn = $('lectures-btn');
+    const signedOut = $('admin-signed-out');
+    const signedInEl = $('admin-signed-in');
+    if (btn) btn.style.display = signedIn ? '' : 'none';
+    if (signedOut) signedOut.style.display = signedIn ? 'none' : '';
+    if (signedInEl) signedInEl.style.display = signedIn ? '' : 'none';
+}
+
+async function _verifyAdminOnLoad() {
+    const token = _getAdminToken();
+    if (!token) { _updateAdminUI(false); return; }
+    try {
+        const res = await _adminFetch('/lectures');
+        _updateAdminUI(res.ok);
+    } catch (_) {
+        _updateAdminUI(false);
+    }
+}
+
+function _openAdminModal() {
+    const modal = $('admin-modal');
+    const input = $('admin-token-input');
+    const errEl = $('admin-modal-error');
+    if (errEl) errEl.style.display = 'none';
+    if (input) input.value = '';
+    if (modal) {
+        modal.style.display = 'flex';
+        modal.setAttribute('aria-hidden', 'false');
+        setTimeout(() => input && input.focus(), 50);
+    }
+}
+function _closeAdminModal() {
+    const modal = $('admin-modal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.setAttribute('aria-hidden', 'true');
+    }
+}
+
+async function _submitAdminToken() {
+    const input = $('admin-token-input');
+    const errEl = $('admin-modal-error');
+    const submitBtn = $('admin-modal-submit');
+    const token = (input && input.value || '').trim();
+    if (!token) {
+        if (errEl) { errEl.textContent = 'Please enter your admin token.'; errEl.style.display = 'block'; }
+        return;
+    }
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+        const res = await fetch(`${API}/admin/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token }),
+        });
+        if (res.ok) {
+            _setAdminToken(token);
+            _updateAdminUI(true);
+            _closeAdminModal();
+            showToast('Signed in as Admin.');
+        } else if (res.status === 401) {
+            if (errEl) { errEl.textContent = 'Invalid token.'; errEl.style.display = 'block'; }
+        } else if (res.status === 503) {
+            if (errEl) { errEl.textContent = 'Admin features are not configured on the server.'; errEl.style.display = 'block'; }
+        } else {
+            if (errEl) { errEl.textContent = `Unexpected error (${res.status}).`; errEl.style.display = 'block'; }
+        }
+    } catch (e) {
+        if (errEl) { errEl.textContent = `Network error: ${e.message}`; errEl.style.display = 'block'; }
+    } finally {
+        if (submitBtn) submitBtn.disabled = false;
+    }
+}
+
+function _signOutAdmin() {
+    _setAdminToken('');
+    _updateAdminUI(false);
+    _closeLecturesPanel();
+    showToast('Signed out of Admin.');
+}
+
+// ─── Lectures drawer ────────────────────────────────────────────────────────
+function _openLecturesPanel() {
+    const panel = $('lectures-panel');
+    if (panel) {
+        panel.classList.add('open');
+        panel.setAttribute('aria-hidden', 'false');
+    }
+    if (typeof updatePanelOverlay === 'function') updatePanelOverlay();
+    _hideLectureForm();
+    _refreshLecturesList();
+}
+
+function _closeLecturesPanel() {
+    const panel = $('lectures-panel');
+    if (panel) {
+        panel.classList.remove('open');
+        panel.setAttribute('aria-hidden', 'true');
+    }
+    if (typeof updatePanelOverlay === 'function') updatePanelOverlay();
+    _hideLectureForm();
+}
+
+async function _refreshLecturesList() {
+    const listEl = $('lectures-list');
+    const emptyEl = $('lectures-empty');
+    if (!listEl) return;
+    listEl.innerHTML = '<p class="lectures-loading">Loading…</p>';
+    try {
+        const res = await _adminFetch('/lectures');
+        if (!res.ok) {
+            listEl.innerHTML = `<p class="lectures-error">Failed to load lectures (HTTP ${res.status}).</p>`;
+            return;
+        }
+        const data = await res.json();
+        const lectures = data.lectures || [];
+        if (lectures.length === 0) {
+            listEl.innerHTML = '<p class="lectures-empty">No lectures yet. Click "+ Add Lecture" to add one.</p>';
+            return;
+        }
+        // Group by class
+        const groups = {};
+        for (const l of lectures) {
+            if (!groups[l.class_name]) groups[l.class_name] = [];
+            groups[l.class_name].push(l);
+        }
+        const html = Object.keys(groups).map(cls => {
+            const friendlyClass = cls === 'UKG' ? 'UKG' : `Class ${cls.replace('class_', '')}`;
+            const items = groups[cls].map(l => `
+                <div class="lecture-item" data-class="${l.class_name}" data-chapter="${l.chapter}">
+                    <div class="lecture-item-info">
+                        <div class="lecture-item-title">Chapter ${l.chapter} — ${_esc(l.title)}</div>
+                        <div class="lecture-item-url"><a href="${_esc(l.youtube_url)}" target="_blank" rel="noopener">${_esc(l.youtube_url)}</a></div>
+                    </div>
+                    <div class="lecture-item-actions">
+                        <button class="btn-mini lecture-edit-btn" data-class="${l.class_name}" data-chapter="${l.chapter}">Edit</button>
+                        <button class="btn-mini lecture-del-btn" data-class="${l.class_name}" data-chapter="${l.chapter}">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+            return `
+                <div class="lecture-group">
+                    <h4 class="lecture-group-title">${friendlyClass} <span class="lecture-group-count">(${groups[cls].length})</span></h4>
+                    ${items}
+                </div>
+            `;
+        }).join('');
+        listEl.innerHTML = html;
+        // Wire up edit/delete
+        listEl.querySelectorAll('.lecture-edit-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const cls = btn.getAttribute('data-class');
+                const ch = parseInt(btn.getAttribute('data-chapter'), 10);
+                const lec = lectures.find(l => l.class_name === cls && l.chapter === ch);
+                if (lec) _showLectureForm('edit', lec);
+            });
+        });
+        listEl.querySelectorAll('.lecture-del-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const cls = btn.getAttribute('data-class');
+                const ch = btn.getAttribute('data-chapter');
+                if (!confirm(`Delete ${cls.replace('class_', 'Class ')} Chapter ${ch}?`)) return;
+                const res = await _adminFetch(`/lectures/${cls}/${ch}`, { method: 'DELETE' });
+                if (res.ok || res.status === 204) {
+                    showToast('Lecture deleted.');
+                    _refreshLecturesList();
+                } else {
+                    showToast(`Delete failed (HTTP ${res.status}).`, 6000);
+                }
+            });
+        });
+    } catch (e) {
+        listEl.innerHTML = `<p class="lectures-error">Network error: ${_esc(e.message)}</p>`;
+    }
+}
+
+function _esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _populateClassDropdown() {
+    const sel = $('lecture-class');
+    if (!sel || sel.options.length > 1) return;  // already populated
+    for (let i = 1; i <= 12; i++) {
+        const opt = document.createElement('option');
+        opt.value = `class_${i}`;
+        opt.textContent = `Class ${i}`;
+        sel.appendChild(opt);
+    }
+}
+
+function _showLectureForm(mode, lec) {
+    _populateClassDropdown();
+    const form = $('lecture-form');
+    const title = $('lecture-form-title');
+    const mode_input = $('lecture-form-mode');
+    const orig = $('lecture-form-original-key');
+    const cls = $('lecture-class');
+    const ch = $('lecture-chapter');
+    const t = $('lecture-title');
+    const url = $('lecture-url');
+    const err = $('lecture-form-error');
+    if (err) err.style.display = 'none';
+    if (mode === 'edit' && lec) {
+        if (title) title.textContent = `Edit Class ${lec.class_name.replace('class_', '')} Chapter ${lec.chapter}`;
+        if (mode_input) mode_input.value = 'edit';
+        if (orig) orig.value = `${lec.class_name}/${lec.chapter}`;
+        if (cls) { cls.value = lec.class_name; cls.disabled = true; }
+        if (ch) { ch.value = lec.chapter; ch.disabled = true; }
+        if (t) t.value = lec.title || '';
+        if (url) url.value = lec.youtube_url || '';
+    } else {
+        if (title) title.textContent = 'Add Lecture';
+        if (mode_input) mode_input.value = 'add';
+        if (orig) orig.value = '';
+        if (cls) { cls.disabled = false; cls.value = 'class_1'; }
+        if (ch) { ch.disabled = false; ch.value = ''; }
+        if (t) t.value = '';
+        if (url) url.value = '';
+    }
+    if (form) form.style.display = '';
+}
+
+function _hideLectureForm() {
+    const form = $('lecture-form');
+    if (form) form.style.display = 'none';
+}
+
+const _YT_RE = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?(?:[^&]*&)*v=|embed\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i;
+
+async function _saveLectureForm() {
+    const mode = ($('lecture-form-mode') || {}).value || 'add';
+    const cls = ($('lecture-class') || {}).value || '';
+    const chRaw = ($('lecture-chapter') || {}).value || '';
+    const titleVal = (($('lecture-title') || {}).value || '').trim();
+    const urlVal = (($('lecture-url') || {}).value || '').trim();
+    const err = $('lecture-form-error');
+    const saveBtn = $('lecture-form-save');
+
+    const setErr = msg => {
+        if (err) { err.textContent = msg; err.style.display = 'block'; }
+    };
+
+    if (err) err.style.display = 'none';
+
+    // Client-side validation (mirrors backend)
+    if (!cls) return setErr('Please choose a class.');
+    const ch = parseInt(chRaw, 10);
+    if (!ch || ch < 1 || ch > 30) return setErr('Chapter must be a number between 1 and 30.');
+    if (!titleVal) return setErr('Title is required.');
+    if (titleVal.length > 120) return setErr('Title must be 120 characters or fewer.');
+    if (!_YT_RE.test(urlVal)) return setErr('Please enter a valid YouTube URL.');
+
+    if (saveBtn) saveBtn.disabled = true;
+    try {
+        let res;
+        if (mode === 'edit') {
+            res = await _adminFetch(`/lectures/${cls}/${ch}`, {
+                method: 'PUT',
+                body: JSON.stringify({ title: titleVal, youtube_url: urlVal }),
+            });
+        } else {
+            res = await _adminFetch('/lectures', {
+                method: 'POST',
+                body: JSON.stringify({ class_name: cls, chapter: ch, title: titleVal, youtube_url: urlVal }),
+            });
+            if (res.status === 409) {
+                if (!confirm(`A lecture already exists at Class ${cls.replace('class_', '')} Chapter ${ch}. Overwrite it?`)) {
+                    if (saveBtn) saveBtn.disabled = false;
+                    return;
+                }
+                res = await _adminFetch('/lectures?overwrite=true', {
+                    method: 'POST',
+                    body: JSON.stringify({ class_name: cls, chapter: ch, title: titleVal, youtube_url: urlVal }),
+                });
+            }
+        }
+        if (res.ok) {
+            showToast(mode === 'edit' ? 'Lecture updated.' : 'Lecture added.');
+            _hideLectureForm();
+            _refreshLecturesList();
+        } else {
+            let detail = `HTTP ${res.status}`;
+            try { const j = await res.json(); detail = j.detail || detail; } catch (_) {}
+            setErr(detail);
+        }
+    } catch (e) {
+        setErr(`Network error: ${e.message}`);
+    } finally {
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
+// Wire up admin/lectures UI on DOM ready
+(function _initAdminLecturesUI() {
+    const bindWhenReady = () => {
+        const lecBtn = $('lectures-btn');
+        const lecClose = $('lectures-close');
+        const addBtn = $('lectures-add-btn');
+        const formCancel = $('lecture-form-cancel');
+        const formSave = $('lecture-form-save');
+        const signinBtn = $('admin-signin-btn');
+        const signoutBtn = $('admin-signout-btn');
+        const modalSubmit = $('admin-modal-submit');
+        const modalCancel = $('admin-modal-cancel');
+        const modalClose = $('admin-modal-close');
+        const tokenInput = $('admin-token-input');
+
+        if (lecBtn) lecBtn.addEventListener('click', _openLecturesPanel);
+        if (lecClose) lecClose.addEventListener('click', _closeLecturesPanel);
+        if (addBtn) addBtn.addEventListener('click', () => _showLectureForm('add'));
+        if (formCancel) formCancel.addEventListener('click', _hideLectureForm);
+        if (formSave) formSave.addEventListener('click', _saveLectureForm);
+        if (signinBtn) signinBtn.addEventListener('click', _openAdminModal);
+        if (signoutBtn) signoutBtn.addEventListener('click', _signOutAdmin);
+        if (modalSubmit) modalSubmit.addEventListener('click', _submitAdminToken);
+        if (modalCancel) modalCancel.addEventListener('click', _closeAdminModal);
+        if (modalClose) modalClose.addEventListener('click', _closeAdminModal);
+        if (tokenInput) tokenInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); _submitAdminToken(); }
+        });
+
+        _verifyAdminOnLoad();
+    };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bindWhenReady);
+    } else {
+        bindWhenReady();
+    }
+})();
 
 // ─── Three.js ambient particle background ───────────────────────────────────
 (function initParticles() {

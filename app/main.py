@@ -2,7 +2,7 @@
 import sys
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Depends
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,7 @@ from app.models import (
     SummaryRequest, SummaryResponse,
     ClassroomAnalyseRequest,
     PracticeFile, PracticeListResponse,
+    AdminLoginRequest, LectureCreate, LectureUpdate, LectureRecord, LectureListResponse,
 )
 
 RATE_LIMIT_MESSAGE = (
@@ -48,6 +49,7 @@ from app.services.vision_service import VisionService
 from app.services.task_manager import TaskManager
 from app.services.upload_service import UploadService
 from app.services import quiz_service
+from app.services import lecture_service
 from app.middleware.auth import get_optional_user
 from app.services.storage_service import (
     upload_bytes_to_s3, startup_restore_from_s3,
@@ -1171,6 +1173,96 @@ async def download_practice_pdf(class_name: str, filename: str, inline: bool = F
         filename=filename,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ─── Feature 8 — Lecture Catalog + Admin Panel ────────────────────────────
+
+def require_admin(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
+    """FastAPI dependency — gates admin-only endpoints.
+
+    - Returns 503 if ADMIN_TOKEN is not configured (admin features disabled, NOT wide-open).
+    - Returns 401 if header is missing or doesn't match (constant-time comparison).
+    """
+    import secrets as _secrets
+    from config import ADMIN_TOKEN as _ADMIN_TOKEN
+    if not _ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="Admin features are not configured on this server.")
+    if not x_admin_token or not _secrets.compare_digest(x_admin_token, _ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Admin authentication required.")
+    return True
+
+
+@app.post("/admin/login")
+async def admin_login(request: AdminLoginRequest):
+    """Verify the admin token. Frontend stores it on success and replays via X-Admin-Token."""
+    import secrets as _secrets
+    from config import ADMIN_TOKEN as _ADMIN_TOKEN
+    if not _ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="Admin features are not configured on this server.")
+    if not _secrets.compare_digest(request.token, _ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid admin token.")
+    return {"ok": True}
+
+
+def _lecture_error_to_http(exc: lecture_service.LectureError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@app.get("/lectures", response_model=LectureListResponse)
+async def list_lectures_endpoint(_: bool = Depends(require_admin)):
+    lectures = lecture_service.list_lectures()
+    return LectureListResponse(lectures=[LectureRecord(**l) for l in lectures], count=len(lectures))
+
+
+@app.post("/lectures", response_model=LectureRecord, status_code=201)
+async def create_lecture(
+    request: LectureCreate,
+    overwrite: bool = False,
+    _: bool = Depends(require_admin),
+):
+    try:
+        rec = lecture_service.add_lecture(
+            class_name=request.class_name,
+            chapter=request.chapter,
+            title=request.title,
+            youtube_url=request.youtube_url,
+            overwrite=overwrite,
+        )
+        return LectureRecord(**rec)
+    except lecture_service.LectureError as e:
+        raise _lecture_error_to_http(e)
+
+
+@app.put("/lectures/{class_name}/{chapter}", response_model=LectureRecord)
+async def update_lecture_endpoint(
+    class_name: str,
+    chapter: int,
+    request: LectureUpdate,
+    _: bool = Depends(require_admin),
+):
+    try:
+        rec = lecture_service.update_lecture(
+            class_name=class_name,
+            chapter=chapter,
+            title=request.title,
+            youtube_url=request.youtube_url,
+        )
+        return LectureRecord(**rec)
+    except lecture_service.LectureError as e:
+        raise _lecture_error_to_http(e)
+
+
+@app.delete("/lectures/{class_name}/{chapter}", status_code=204)
+async def delete_lecture_endpoint(
+    class_name: str,
+    chapter: int,
+    _: bool = Depends(require_admin),
+):
+    try:
+        lecture_service.delete_lecture(class_name=class_name, chapter=chapter)
+        return Response(status_code=204)
+    except lecture_service.LectureError as e:
+        raise _lecture_error_to_http(e)
 
 
 @app.post("/classroom/analyse")

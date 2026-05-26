@@ -58,6 +58,11 @@
                         <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
                     </svg>
                 </button>
+                <button class="btn-icon lectures-btn" id="lectures-btn" title="Manage Lectures (admin only)" style="display:none">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                    </svg>
+                </button>
                 <button class="btn-icon settings-btn" id="settings-btn" title="Settings">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -208,8 +213,88 @@
                     </label>
                 </div>
                 <p class="settings-hint">Activity and search panels open automatically when data is available. Thinking sounds play a short cue while the AI processes. Voice interruption lets you interrupt the AI by speaking — it will stop talking and listen to you.</p>
+                <div class="settings-section-divider"></div>
+                <h4 class="settings-section-title">Admin</h4>
+                <div class="settings-item admin-signed-out" id="admin-signed-out">
+                    <span class="settings-label">Not signed in</span>
+                    <button class="btn-secondary" id="admin-signin-btn">Sign in as Admin</button>
+                </div>
+                <div class="settings-item admin-signed-in" id="admin-signed-in" style="display:none">
+                    <span class="settings-label">Signed in as Admin <span style="color:#4ade80">✓</span></span>
+                    <button class="btn-secondary" id="admin-signout-btn">Sign out</button>
+                </div>
+                <p class="settings-hint">Admin access unlocks the Lectures management panel where you can add, edit, and remove YouTube lectures. Regular users cannot see or modify the catalog.</p>
             </div>
         </div>
+
+        <!-- Admin token entry modal -->
+        <div class="modal-overlay" id="admin-modal" aria-hidden="true" style="display:none">
+            <div class="modal-card">
+                <div class="modal-header">
+                    <h3>Admin Sign-in</h3>
+                    <button class="btn-icon" id="admin-modal-close" aria-label="Close">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <label class="modal-label" for="admin-token-input">Enter your admin token</label>
+                    <input type="password" id="admin-token-input" class="modal-input" placeholder="ADMIN_TOKEN from HF Space secrets" autocomplete="off">
+                    <p class="modal-error" id="admin-modal-error" style="display:none"></p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-secondary" id="admin-modal-cancel">Cancel</button>
+                    <button class="btn-primary" id="admin-modal-submit">Sign in</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lectures management drawer -->
+        <div class="lectures-panel glass-panel" id="lectures-panel" aria-hidden="true">
+            <div class="lectures-header">
+                <h3 class="lectures-title">Manage Lectures</h3>
+                <button class="lectures-close btn-icon" id="lectures-close" title="Close" aria-label="Close lectures">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="lectures-body">
+                <button class="btn-primary lectures-add-btn" id="lectures-add-btn">+ Add Lecture</button>
+
+                <!-- Inline add/edit form (hidden by default) -->
+                <div class="lecture-form" id="lecture-form" style="display:none">
+                    <h4 class="lecture-form-title" id="lecture-form-title">Add Lecture</h4>
+                    <input type="hidden" id="lecture-form-mode" value="add">
+                    <input type="hidden" id="lecture-form-original-key" value="">
+                    <div class="lecture-form-row">
+                        <label for="lecture-class">Class</label>
+                        <select id="lecture-class">
+                            <option value="UKG">UKG</option>
+                        </select>
+                    </div>
+                    <div class="lecture-form-row">
+                        <label for="lecture-chapter">Chapter</label>
+                        <input type="number" id="lecture-chapter" min="1" max="30" placeholder="1–30">
+                    </div>
+                    <div class="lecture-form-row">
+                        <label for="lecture-title">Title</label>
+                        <input type="text" id="lecture-title" maxlength="120" placeholder="e.g. Fractions">
+                    </div>
+                    <div class="lecture-form-row">
+                        <label for="lecture-url">YouTube URL</label>
+                        <input type="text" id="lecture-url" placeholder="https://www.youtube.com/watch?v=...">
+                    </div>
+                    <p class="lecture-form-error" id="lecture-form-error" style="display:none"></p>
+                    <div class="lecture-form-actions">
+                        <button class="btn-secondary" id="lecture-form-cancel">Cancel</button>
+                        <button class="btn-primary" id="lecture-form-save">Save</button>
+                    </div>
+                </div>
+
+                <div class="lectures-list" id="lectures-list">
+                    <p class="lectures-empty" id="lectures-empty">No lectures yet. Click "+ Add Lecture" to add one.</p>
+                </div>
+            </div>
+        </div>
+
         <div class="panel-overlay" id="panel-overlay" aria-hidden="true"></div>
         <div class="speech-widget" id="speech-widget" aria-hidden="true">
             <div class="speech-widget-inner">

@@ -231,6 +231,53 @@ class ChatService:
         logger.info("[REALTIME] Response length: %d chars | Preview: %.120s", len(response), response)
         return response
 
+    def _handle_youtube_video(
+        self, session_id: str, video_id: str, full_url: Optional[str], friendly_text: Optional[str] = None,
+    ) -> Iterator[Union[str, Dict[str, Any]]]:
+        """Shared YouTube-detection flow.
+
+        Sets pending_youtube, kicks off a background transcript fetch, yields
+        the _youtube_detected event, then yields the friendly response and
+        saves the chat session. Used by both the YouTube URL detection branch
+        and the Feature 8 lecture command branch.
+        """
+        from app.services import quiz_service as _qs
+
+        self.set_session_metadata(session_id, "pending_youtube", {
+            "video_id": video_id,
+            "transcript": None,
+            "status": "fetching",
+        })
+
+        def _fetch_bg(_vid=video_id, _sid=session_id):
+            try:
+                _t = _qs.get_transcript(_vid)
+                self.set_session_metadata(_sid, "pending_youtube", {
+                    "video_id": _vid,
+                    "transcript": _t,
+                    "status": "ready",
+                })
+                logger.info("[YOUTUBE] Background transcript ready for %s: %d chars", _vid, len(_t))
+            except Exception as _e:
+                self.set_session_metadata(_sid, "pending_youtube", {
+                    "video_id": _vid,
+                    "transcript": None,
+                    "status": "failed",
+                    "error": str(_e),
+                })
+                logger.warning("[YOUTUBE] Background transcript failed for %s: %s", _vid, _e)
+
+        threading.Thread(target=_fetch_bg, daemon=True).start()
+
+        yield {"_youtube_detected": {"video_id": video_id, "url": full_url}}
+        resp = friendly_text or (
+            "I've opened the video for you, Sir. Watch the full video and come back when you're done "
+            "— I'll generate MCQs, a summary, or answer any questions you have about it."
+        )
+        self.sessions[session_id][-1].content = resp
+        yield resp
+        self.save_chat_session(session_id)
+
     def process_message_stream(
         self, session_id: str, user_message: str
     ) -> Iterator[Union[str, Dict[str, Any]]]:
@@ -331,45 +378,35 @@ class ChatService:
 
         yield {"_activity": {"event": "query_detected", "message": user_message}}
 
-        # --- YouTube URL detection (pre-brain shortcut) ---
+        # --- Lecture catalog command (pre-brain shortcut, Feature 8) ---
         from app.services import quiz_service as _qs
+        from app.services import lecture_service as _ls
+        _lec = _ls.match_lecture_command(user_message)
+        if _lec:
+            if _lec.get("_not_found"):
+                # Command parsed but no video is saved for that slot.
+                _miss_resp = (
+                    f"Sir, I don't have a video saved for Class {_lec['class_num']} Chapter {_lec['chapter']}. "
+                    f"You can add it from the Lectures panel."
+                )
+                self.sessions[session_id][-1].content = _miss_resp
+                yield _miss_resp
+                self.save_chat_session(session_id)
+                return
+            _friendly = (
+                f"Opening Class {_lec['class_num']} Chapter {_lec['chapter']} — {_lec['title']}, Sir. "
+                f"Watch the full video and come back when you're done."
+            )
+            yield from self._handle_youtube_video(
+                session_id, _lec["video_id"], _lec["youtube_url"], friendly_text=_friendly
+            )
+            return
+
+        # --- YouTube URL detection (pre-brain shortcut) ---
         _video_id = _qs.extract_video_id(user_message)
         if _video_id:
             _full_url = _qs.get_full_url(user_message)
-
-            # Mark as fetching immediately so return-signal detection works while transcript loads
-            self.set_session_metadata(session_id, "pending_youtube", {
-                "video_id": _video_id,
-                "transcript": None,
-                "status": "fetching",
-            })
-
-            # Fetch transcript in background — Whisper can take 30-60s for long videos
-            def _fetch_bg(_vid=_video_id, _sid=session_id):
-                try:
-                    _t = _qs.get_transcript(_vid)
-                    self.set_session_metadata(_sid, "pending_youtube", {
-                        "video_id": _vid,
-                        "transcript": _t,
-                        "status": "ready",
-                    })
-                    logger.info("[YOUTUBE] Background transcript ready for %s: %d chars", _vid, len(_t))
-                except Exception as _e:
-                    self.set_session_metadata(_sid, "pending_youtube", {
-                        "video_id": _vid,
-                        "transcript": None,
-                        "status": "failed",
-                        "error": str(_e),
-                    })
-                    logger.warning("[YOUTUBE] Background transcript failed for %s: %s", _vid, _e)
-
-            threading.Thread(target=_fetch_bg, daemon=True).start()
-
-            yield {"_youtube_detected": {"video_id": _video_id, "url": _full_url}}
-            _yt_resp = "I've opened the video for you, Sir. Watch the full video and come back when you're done — I'll generate MCQs, a summary, or answer any questions you have about it."
-            self.sessions[session_id][-1].content = _yt_resp
-            yield _yt_resp
-            self.save_chat_session(session_id)
+            yield from self._handle_youtube_video(session_id, _video_id, _full_url)
             return
 
         # --- User returning after watching a video ---
