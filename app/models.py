@@ -105,3 +105,60 @@ class LectureRecord(BaseModel):
 class LectureListResponse(BaseModel):
     lectures: List[LectureRecord]
     count: int
+
+
+# Feature 9 — Practical Exercises
+class PracticalCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+    url: str = Field(..., min_length=1)
+    platform: str = Field(..., min_length=1)
+    type: str = Field(..., min_length=1)
+    difficulty: str = Field(..., min_length=1)
+    estimated_minutes: int = Field(..., ge=1, le=600)
+    description: str = Field(..., min_length=1, max_length=500)
+    tags: Optional[List[str]] = None
+
+
+class PracticalRecord(BaseModel):
+    id: str
+    title: str
+    url: str
+    platform: str
+    type: str
+    difficulty: str
+    estimated_minutes: int
+    description: str
+    tags: List[str] = []
+    created_at: str
+    updated_at: str
+
+
+class PracticalBundle(BaseModel):
+    class_name: str
+    chapter: int
+    lecture: dict
+    curated: List[PracticalRecord]
+    class_pdfs: List[PracticeFile]
+
+
+class AIPracticalRequest(BaseModel):
+    session_id: str
+    video_id: str
+    use_cache: bool = True
+
+
+class AIPracticalTask(BaseModel):
+    title: str
+    description: str
+    steps: List[str]
+    platform_suggestion: str
+    starter_code: str = ""
+    estimated_minutes: int
+    difficulty: str
+    learning_outcomes: List[str] = []
+
+
+class AIPracticalResponse(BaseModel):
+    video_id: str
+    tasks: List[AIPracticalTask]
+    cached: bool

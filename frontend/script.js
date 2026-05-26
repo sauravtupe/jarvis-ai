@@ -1880,6 +1880,9 @@ async function sendMessage(textOverride) {
                     if (data.practice_files) {
                         renderPracticeFiles(data.practice_files, contentEl);
                     }
+                    if (data.practicals) {
+                        renderPracticalBundle(data.practicals, contentEl);
+                    }
                     if ('chunk' in data) {
                         const chunkText = data.chunk || '';
                         if (chunkText && !firstChunkReceived) {
@@ -1974,20 +1977,30 @@ function renderYouTubeChoiceButtons(videoId, contentEl) {
     const sumBtn = document.createElement('button');
     sumBtn.className = 'yt-choice-btn';
     sumBtn.innerHTML = '&#128218; Summarise the Video';
+    const pracBtn = document.createElement('button');
+    pracBtn.className = 'yt-choice-btn';
+    pracBtn.innerHTML = '&#128170; Practical Exercises';
     wrap.appendChild(mcqBtn);
     wrap.appendChild(sumBtn);
+    wrap.appendChild(pracBtn);
     target.appendChild(wrap);
     scrollToBottom();
 
+    const disableAll = () => { mcqBtn.disabled = true; sumBtn.disabled = true; pracBtn.disabled = true; };
     mcqBtn.addEventListener('click', () => {
-        mcqBtn.disabled = true; sumBtn.disabled = true;
+        disableAll();
         mcqBtn.classList.add('selected');
         startQuiz(videoId);
     });
     sumBtn.addEventListener('click', () => {
-        mcqBtn.disabled = true; sumBtn.disabled = true;
+        disableAll();
         sumBtn.classList.add('selected');
         startSummary(videoId);
+    });
+    pracBtn.addEventListener('click', () => {
+        disableAll();
+        pracBtn.classList.add('selected');
+        startPracticals(videoId);
     });
 }
 
@@ -2084,7 +2097,7 @@ async function startQuiz(videoId) {
         }
         const data = await res.json();
         if (loadingEl && loadingEl.closest('.message')) loadingEl.closest('.message').remove();
-        currentQuiz = { questions: data.questions, currentIdx: 0, score: 0 };
+        currentQuiz = { questions: data.questions, currentIdx: 0, score: 0, video_id: videoId };
         renderQuestion(0);
     } catch (e) {
         if (loadingEl) loadingEl.textContent = `Sorry Sir, quiz generation failed: ${e.message}`;
@@ -2332,6 +2345,7 @@ function renderQuizResult() {
         <div class="quiz-result-pct">${pct}% Correct</div>
         <div class="quiz-result-actions">
             <button class="quiz-action-btn" id="quiz-replay-btn">&#x1F504; Try Again</button>
+            <button class="quiz-action-btn" id="quiz-practical-btn">&#128170; Try Practical</button>
             <button class="quiz-action-btn secondary" id="quiz-done-btn">&#x2705; Done</button>
         </div>`;
 
@@ -2352,6 +2366,21 @@ function renderQuizResult() {
         currentQuiz.currentIdx = 0;
         renderQuestion(0);
     });
+    const pracBtnEl = card.querySelector('#quiz-practical-btn');
+    if (pracBtnEl) {
+        pracBtnEl.addEventListener('click', () => {
+            pracBtnEl.disabled = true;
+            const vid = (pendingYouTube && pendingYouTube.video_id) || (currentQuiz && currentQuiz.video_id);
+            voiceQuizMode = false;
+            _quizListening = false;
+            currentQuiz = null;
+            if (vid) {
+                startPracticals(vid);
+            } else {
+                addMessage('assistant', 'Sir, I need the video context to find practicals. Open the lecture again.');
+            }
+        });
+    }
     card.querySelector('#quiz-done-btn').addEventListener('click', () => {
         voiceQuizMode = false;
         _quizListening = false;
@@ -2380,6 +2409,216 @@ async function startSummary(videoId) {
     } catch (e) {
         if (loadingEl) loadingEl.textContent = `Sorry Sir, summary generation failed: ${e.message}`;
     }
+}
+
+
+// ─── Feature 9 — Practical exercises (student UI) ────────────────────────────
+
+async function startPracticals(videoId) {
+    // Step 1: find the lecture's class/chapter by video_id (we need it for the bundle endpoint)
+    // We rely on the server to look this up — but the GET endpoint needs class+chapter.
+    // Quick lookup: GET /lectures (admin-only) won't work for non-admins, so instead
+    // we fetch the lecture catalog mapping via a lightweight resolve route.
+    // For now, we POST a chat-style command that hits the pre-brain shortcut server-side.
+    const loadingEl = addMessage('assistant', 'Loading practical exercises, Sir — just a moment...');
+    try {
+        // Send a "give me practical" message — the server uses pending_youtube context
+        // to resolve which class/chapter this video maps to.
+        const res = await fetch(`${API}/chat/jarvis/stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({
+                message: 'give me practical exercises for this lecture',
+                session_id: sessionId,
+                tts: false,
+            }),
+        });
+        if (!res.ok || !res.body) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let bundle = null;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop() || '';
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.practicals) bundle = data.practicals;
+                } catch (_) {}
+            }
+        }
+        if (loadingEl && loadingEl.closest('.message')) loadingEl.closest('.message').remove();
+        if (!bundle) {
+            addMessage('assistant', "Sir, I couldn't load practical exercises for this lecture.");
+            return;
+        }
+        const contentEl = addMessage('assistant', '').parentElement.querySelector('.msg-content') || addMessage('assistant', '');
+        renderPracticalBundle(bundle, contentEl);
+
+        // Kick off AI task generation in parallel — render asynchronously when ready
+        _fetchAndRenderAITasks(videoId, contentEl);
+    } catch (e) {
+        if (loadingEl) loadingEl.textContent = `Sorry Sir, practicals failed: ${e.message}`;
+    }
+}
+
+async function _fetchAndRenderAITasks(videoId, contentEl) {
+    // Insert a loading placeholder for the AI section
+    const aiSection = document.createElement('div');
+    aiSection.className = 'practical-section practical-section-ai';
+    aiSection.innerHTML = `
+        <div class="practical-section-header">
+            <span class="practical-section-icon">🤖</span>
+            <span class="practical-section-title">AI-Generated Hands-On Tasks</span>
+        </div>
+        <p class="practical-loading">Crafting custom exercises for this lecture, Sir…</p>`;
+    contentEl.appendChild(aiSection);
+    scrollToBottom();
+    try {
+        const res = await fetch(`${API}/practicals/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ session_id: sessionId, video_id: videoId, use_cache: true }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            aiSection.querySelector('.practical-loading').textContent =
+                `AI tasks unavailable: ${err.detail || `HTTP ${res.status}`}`;
+            return;
+        }
+        const data = await res.json();
+        const tasks = data.tasks || [];
+        if (tasks.length === 0) {
+            aiSection.querySelector('.practical-loading').textContent = 'No AI tasks generated for this lecture.';
+            return;
+        }
+        const cardsHTML = tasks.map(t => _renderAITaskCard(t)).join('');
+        aiSection.querySelector('.practical-loading').remove();
+        const wrap = document.createElement('div');
+        wrap.className = 'practical-cards';
+        wrap.innerHTML = cardsHTML;
+        aiSection.appendChild(wrap);
+        if (data.cached) {
+            const note = document.createElement('p');
+            note.className = 'practical-cache-note';
+            note.textContent = '(cached from earlier generation — same lecture)';
+            aiSection.appendChild(note);
+        }
+        scrollToBottom();
+    } catch (e) {
+        const loadingP = aiSection.querySelector('.practical-loading');
+        if (loadingP) loadingP.textContent = `AI tasks failed: ${e.message}`;
+    }
+}
+
+function _renderAITaskCard(task) {
+    const steps = (task.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+    const outcomes = (task.learning_outcomes || []).map(o => `<li>${escapeHtml(o)}</li>`).join('');
+    const code = task.starter_code ? `<pre class="practical-code"><code>${escapeHtml(task.starter_code)}</code></pre>` : '';
+    return `
+        <div class="practical-card practical-ai-card">
+            <div class="practical-card-title">
+                <span class="practical-badge practical-difficulty practical-difficulty-${escapeHtml(task.difficulty)}">${escapeHtml(task.difficulty)}</span>
+                <span class="practical-badge practical-time">${task.estimated_minutes} min</span>
+                <span class="practical-badge practical-platform">${escapeHtml(task.platform_suggestion || 'Google Colab')}</span>
+                ${escapeHtml(task.title)}
+            </div>
+            <p class="practical-card-desc">${escapeHtml(task.description)}</p>
+            ${steps ? `<div class="practical-steps"><strong>Steps:</strong><ol>${steps}</ol></div>` : ''}
+            ${code}
+            ${outcomes ? `<div class="practical-outcomes"><strong>You'll learn:</strong><ul>${outcomes}</ul></div>` : ''}
+        </div>`;
+}
+
+function renderPracticalBundle(bundle, contentEl) {
+    const target = contentEl || Array.from(
+        document.querySelectorAll('.message.assistant .msg-content')
+    ).pop();
+    if (!target || !bundle) return;
+    const friendlyClass = bundle.class_name === 'UKG' ? 'UKG' : `Class ${bundle.class_name.replace('class_', '')}`;
+    const wrap = document.createElement('div');
+    wrap.className = 'practical-bundle';
+
+    const header = document.createElement('div');
+    header.className = 'practical-bundle-header';
+    header.innerHTML = `
+        <span class="practical-bundle-title">💪 Practical Exercises</span>
+        <span class="practical-bundle-context">${escapeHtml(friendlyClass)} • Chapter ${bundle.chapter}${bundle.lecture && bundle.lecture.title ? ' • ' + escapeHtml(bundle.lecture.title) : ''}</span>
+    `;
+    wrap.appendChild(header);
+
+    // Section 1: curated
+    const curated = bundle.curated || [];
+    const curatedSection = document.createElement('div');
+    curatedSection.className = 'practical-section practical-section-curated';
+    curatedSection.innerHTML = `
+        <div class="practical-section-header">
+            <span class="practical-section-icon">💡</span>
+            <span class="practical-section-title">Curated Exercises</span>
+        </div>`;
+    if (curated.length === 0) {
+        const p = document.createElement('p');
+        p.className = 'practical-empty';
+        p.textContent = 'No curated practicals saved for this chapter yet.';
+        curatedSection.appendChild(p);
+    } else {
+        const cards = document.createElement('div');
+        cards.className = 'practical-cards';
+        cards.innerHTML = curated.map(p => `
+            <div class="practical-card practical-curated-card">
+                <div class="practical-card-title">
+                    <span class="practical-badge practical-platform">${escapeHtml(p.platform)}</span>
+                    <span class="practical-badge practical-difficulty practical-difficulty-${escapeHtml(p.difficulty)}">${escapeHtml(p.difficulty)}</span>
+                    <span class="practical-badge practical-time">${p.estimated_minutes} min</span>
+                    ${escapeHtml(p.title)}
+                </div>
+                <p class="practical-card-desc">${escapeHtml(p.description)}</p>
+                <a class="practical-open-link" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">
+                    Open exercise →
+                </a>
+            </div>
+        `).join('');
+        curatedSection.appendChild(cards);
+    }
+    wrap.appendChild(curatedSection);
+
+    // Section 2: class PDFs (general material)
+    const pdfs = bundle.class_pdfs || [];
+    if (pdfs.length > 0) {
+        const pdfSection = document.createElement('div');
+        pdfSection.className = 'practical-section practical-section-pdfs';
+        pdfSection.innerHTML = `
+            <div class="practical-section-header">
+                <span class="practical-section-icon">📚</span>
+                <span class="practical-section-title">General Class Material</span>
+            </div>`;
+        const pdfList = document.createElement('div');
+        pdfList.className = 'practical-pdf-list';
+        pdfList.innerHTML = pdfs.map(f => `
+            <div class="practice-card">
+                <div class="practice-card-info">
+                    <div class="practice-card-name">${escapeHtml(f.filename)}</div>
+                    <div class="practice-card-meta">${escapeHtml(f.size_label)}</div>
+                </div>
+                <div class="practice-card-btns">
+                    <a class="practice-open-btn" href="${escapeHtml(f.download_url)}" target="_blank" rel="noopener">Open</a>
+                    <a class="practice-download-btn" href="${escapeHtml(f.download_url)}" download>Download</a>
+                </div>
+            </div>
+        `).join('');
+        pdfSection.appendChild(pdfList);
+        wrap.appendChild(pdfSection);
+    }
+
+    target.appendChild(wrap);
+    scrollToBottom();
 }
 
 function renderMarkdown(text) {
@@ -2557,8 +2796,9 @@ async function _refreshLecturesList() {
                         <div class="lecture-item-url"><a href="${_esc(l.youtube_url)}" target="_blank" rel="noopener">${_esc(l.youtube_url)}</a></div>
                     </div>
                     <div class="lecture-item-actions">
-                        <button class="btn-mini lecture-edit-btn" data-class="${l.class_name}" data-chapter="${l.chapter}">Edit</button>
-                        <button class="btn-mini lecture-del-btn" data-class="${l.class_name}" data-chapter="${l.chapter}">Delete</button>
+                        <button class="btn-mini lecture-edit-btn" data-class="${l.class_name}" data-chapter="${l.chapter}" title="Edit lecture">Edit</button>
+                        <button class="btn-mini lecture-prac-btn" data-class="${l.class_name}" data-chapter="${l.chapter}" data-title="${_esc(l.title)}" title="Manage practical exercises">Practicals</button>
+                        <button class="btn-mini lecture-del-btn" data-class="${l.class_name}" data-chapter="${l.chapter}" title="Delete lecture">Delete</button>
                     </div>
                 </div>
             `).join('');
@@ -2591,6 +2831,14 @@ async function _refreshLecturesList() {
                 } else {
                     showToast(`Delete failed (HTTP ${res.status}).`, 6000);
                 }
+            });
+        });
+        listEl.querySelectorAll('.lecture-prac-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const cls = btn.getAttribute('data-class');
+                const ch = parseInt(btn.getAttribute('data-chapter'), 10);
+                const title = btn.getAttribute('data-title') || '';
+                _openPracticalsAdminPanel(cls, ch, title);
             });
         });
     } catch (e) {
@@ -2747,6 +2995,224 @@ async function _saveLectureForm() {
         });
 
         _verifyAdminOnLoad();
+    };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bindWhenReady);
+    } else {
+        bindWhenReady();
+    }
+})();
+
+
+// ─── Feature 9: Practicals admin panel ───────────────────────────────────────
+
+let _practicalsCurrentClass = null;
+let _practicalsCurrentChapter = null;
+let _practicalsCurrentLectureTitle = '';
+
+function _openPracticalsAdminPanel(class_name, chapter, lecture_title) {
+    _practicalsCurrentClass = class_name;
+    _practicalsCurrentChapter = chapter;
+    _practicalsCurrentLectureTitle = lecture_title || '';
+    const panel = $('practicals-panel');
+    const ctx = $('practicals-context');
+    const titleEl = $('practicals-panel-title');
+    const friendlyClass = class_name === 'UKG' ? 'UKG' : `Class ${class_name.replace('class_', '')}`;
+    if (titleEl) titleEl.textContent = `Practicals — ${friendlyClass} Chapter ${chapter}`;
+    if (ctx) ctx.textContent = lecture_title ? `Lecture: ${lecture_title}` : '';
+    if (panel) {
+        panel.classList.add('open');
+        panel.setAttribute('aria-hidden', 'false');
+    }
+    if (typeof updatePanelOverlay === 'function') updatePanelOverlay();
+    _hidePracticalForm();
+    _refreshPracticalsList();
+}
+
+function _closePracticalsAdminPanel(allTheWay) {
+    const panel = $('practicals-panel');
+    if (panel) {
+        panel.classList.remove('open');
+        panel.setAttribute('aria-hidden', 'true');
+    }
+    _practicalsCurrentClass = null;
+    _practicalsCurrentChapter = null;
+    _practicalsCurrentLectureTitle = '';
+    _hidePracticalForm();
+    if (allTheWay && typeof _closeLecturesPanel === 'function') _closeLecturesPanel();
+    if (typeof updatePanelOverlay === 'function') updatePanelOverlay();
+}
+
+async function _refreshPracticalsList() {
+    const listEl = $('practicals-list');
+    if (!listEl || !_practicalsCurrentClass) return;
+    listEl.innerHTML = '<p class="lectures-loading">Loading…</p>';
+    try {
+        const res = await _adminFetch(`/lectures/${_practicalsCurrentClass}/${_practicalsCurrentChapter}/practicals`);
+        if (!res.ok) {
+            listEl.innerHTML = `<p class="lectures-error">Failed to load practicals (HTTP ${res.status}).</p>`;
+            return;
+        }
+        const bundle = await res.json();
+        const practicals = bundle.curated || [];
+        if (practicals.length === 0) {
+            listEl.innerHTML = '<p class="lectures-empty">No practicals yet. Click "+ Add Practical" to add one.</p>';
+            return;
+        }
+        const html = practicals.map(p => `
+            <div class="lecture-item practical-item" data-id="${_esc(p.id)}">
+                <div class="lecture-item-info">
+                    <div class="lecture-item-title">
+                        <span class="practical-badge practical-platform">${_esc(p.platform)}</span>
+                        <span class="practical-badge practical-difficulty practical-difficulty-${_esc(p.difficulty)}">${_esc(p.difficulty)}</span>
+                        <span class="practical-badge practical-time">${p.estimated_minutes} min</span>
+                        ${_esc(p.title)}
+                    </div>
+                    <div class="lecture-item-url"><a href="${_esc(p.url)}" target="_blank" rel="noopener">${_esc(p.url)}</a></div>
+                    <div class="practical-desc">${_esc(p.description)}</div>
+                </div>
+                <div class="lecture-item-actions">
+                    <button class="btn-mini practical-edit-btn" data-id="${_esc(p.id)}">Edit</button>
+                    <button class="btn-mini practical-del-btn" data-id="${_esc(p.id)}">Delete</button>
+                </div>
+            </div>
+        `).join('');
+        listEl.innerHTML = html;
+
+        listEl.querySelectorAll('.practical-edit-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const id = btn.getAttribute('data-id');
+                const p = practicals.find(x => x.id === id);
+                if (p) _showPracticalForm('edit', p);
+            });
+        });
+        listEl.querySelectorAll('.practical-del-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const id = btn.getAttribute('data-id');
+                if (!confirm('Delete this practical?')) return;
+                const res2 = await _adminFetch(
+                    `/lectures/${_practicalsCurrentClass}/${_practicalsCurrentChapter}/practicals/${id}`,
+                    { method: 'DELETE' }
+                );
+                if (res2.ok || res2.status === 204) {
+                    showToast('Practical deleted.');
+                    _refreshPracticalsList();
+                } else {
+                    showToast(`Delete failed (HTTP ${res2.status}).`, 6000);
+                }
+            });
+        });
+    } catch (e) {
+        listEl.innerHTML = `<p class="lectures-error">Network error: ${_esc(e.message)}</p>`;
+    }
+}
+
+function _showPracticalForm(mode, p) {
+    const form = $('practical-form');
+    const title = $('practical-form-title');
+    const modeInput = $('practical-form-mode');
+    const idInput = $('practical-form-id');
+    const err = $('practical-form-error');
+    if (err) err.style.display = 'none';
+    if (mode === 'edit' && p) {
+        if (title) title.textContent = 'Edit Practical';
+        if (modeInput) modeInput.value = 'edit';
+        if (idInput) idInput.value = p.id || '';
+        $('practical-title').value = p.title || '';
+        $('practical-url').value = p.url || '';
+        $('practical-platform').value = p.platform || 'Google Colab';
+        $('practical-type').value = p.type || 'notebook';
+        $('practical-difficulty').value = p.difficulty || 'beginner';
+        $('practical-minutes').value = p.estimated_minutes || 30;
+        $('practical-description').value = p.description || '';
+        $('practical-tags').value = (p.tags || []).join(', ');
+    } else {
+        if (title) title.textContent = 'Add Practical';
+        if (modeInput) modeInput.value = 'add';
+        if (idInput) idInput.value = '';
+        $('practical-title').value = '';
+        $('practical-url').value = '';
+        $('practical-platform').value = 'Google Colab';
+        $('practical-type').value = 'notebook';
+        $('practical-difficulty').value = 'beginner';
+        $('practical-minutes').value = 30;
+        $('practical-description').value = '';
+        $('practical-tags').value = '';
+    }
+    if (form) form.style.display = '';
+}
+
+function _hidePracticalForm() {
+    const form = $('practical-form');
+    if (form) form.style.display = 'none';
+}
+
+async function _savePracticalForm() {
+    const mode = ($('practical-form-mode') || {}).value || 'add';
+    const id = ($('practical-form-id') || {}).value || '';
+    const titleVal = ($('practical-title').value || '').trim();
+    const urlVal = ($('practical-url').value || '').trim();
+    const platform = ($('practical-platform').value || '').trim();
+    const type = ($('practical-type').value || '').trim();
+    const difficulty = ($('practical-difficulty').value || '').trim();
+    const minutes = parseInt($('practical-minutes').value || '30', 10);
+    const description = ($('practical-description').value || '').trim();
+    const tagsRaw = ($('practical-tags').value || '').trim();
+    const tags = tagsRaw ? tagsRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const err = $('practical-form-error');
+    const saveBtn = $('practical-form-save');
+
+    const setErr = msg => { if (err) { err.textContent = msg; err.style.display = 'block'; } };
+    if (err) err.style.display = 'none';
+
+    if (!titleVal) return setErr('Title is required.');
+    if (titleVal.length > 120) return setErr('Title must be 120 characters or fewer.');
+    if (!/^https?:\/\/.+/i.test(urlVal)) return setErr('URL must start with http:// or https://');
+    if (!platform || !type || !difficulty) return setErr('Platform, Type, and Difficulty are required.');
+    if (!minutes || minutes < 1 || minutes > 600) return setErr('Estimated minutes must be 1–600.');
+    if (!description) return setErr('Description is required.');
+    if (description.length > 500) return setErr('Description must be 500 characters or fewer.');
+
+    const payload = {
+        title: titleVal, url: urlVal, platform, type, difficulty,
+        estimated_minutes: minutes, description, tags,
+    };
+
+    if (saveBtn) saveBtn.disabled = true;
+    try {
+        const base = `/lectures/${_practicalsCurrentClass}/${_practicalsCurrentChapter}/practicals`;
+        const res = (mode === 'edit')
+            ? await _adminFetch(`${base}/${id}`, { method: 'PUT', body: JSON.stringify(payload) })
+            : await _adminFetch(base, { method: 'POST', body: JSON.stringify(payload) });
+        if (res.ok) {
+            showToast(mode === 'edit' ? 'Practical updated.' : 'Practical added.');
+            _hidePracticalForm();
+            _refreshPracticalsList();
+        } else {
+            let detail = `HTTP ${res.status}`;
+            try { const j = await res.json(); detail = j.detail || detail; } catch (_) {}
+            setErr(detail);
+        }
+    } catch (e) {
+        setErr(`Network error: ${e.message}`);
+    } finally {
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
+(function _initPracticalsAdminUI() {
+    const bindWhenReady = () => {
+        const closeBtn = $('practicals-close');
+        const backBtn = $('practicals-back');
+        const addBtn = $('practicals-add-btn');
+        const formCancel = $('practical-form-cancel');
+        const formSave = $('practical-form-save');
+
+        if (closeBtn) closeBtn.addEventListener('click', () => _closePracticalsAdminPanel(true));
+        if (backBtn) backBtn.addEventListener('click', () => _closePracticalsAdminPanel(false));
+        if (addBtn) addBtn.addEventListener('click', () => _showPracticalForm('add'));
+        if (formCancel) formCancel.addEventListener('click', _hidePracticalForm);
+        if (formSave) formSave.addEventListener('click', _savePracticalForm);
     };
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', bindWhenReady);

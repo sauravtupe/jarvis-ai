@@ -599,6 +599,275 @@ def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
     return validated
 
 
+# ─── AI-generated practical tasks (Feature 9) ───────────────────────────────
+
+
+def _practical_cache_key(video_id: str, prompt_version: str) -> str:
+    """S3 key for cached AI-generated tasks. Versioned so prompt changes invalidate."""
+    safe_vid = re.sub(r"[^a-zA-Z0-9_-]", "_", video_id or "unknown")
+    return f"practicals_ai_cache/{prompt_version}/{safe_vid}.json"
+
+
+def _load_practicals_from_cache(video_id: str, prompt_version: str) -> Optional[List[dict]]:
+    try:
+        from app.services.storage_service import download_from_s3
+    except Exception:
+        return None
+    try:
+        data = download_from_s3(_practical_cache_key(video_id, prompt_version))
+        if not data:
+            return None
+        tasks = json.loads(data.decode("utf-8"))
+        if isinstance(tasks, list) and tasks:
+            logger.info("[PRACTICAL] AI cache HIT for video_id=%s (%d tasks)", video_id, len(tasks))
+            return tasks
+    except Exception as e:
+        logger.debug("[PRACTICAL] AI cache miss / read error for %s: %s", video_id, e)
+    return None
+
+
+def _save_practicals_to_cache(video_id: str, prompt_version: str, tasks: List[dict]) -> None:
+    try:
+        from app.services.storage_service import upload_bytes_to_s3
+        payload = json.dumps(tasks, ensure_ascii=False, indent=2).encode("utf-8")
+        upload_bytes_to_s3(payload, _practical_cache_key(video_id, prompt_version), content_type="application/json")
+        logger.info("[PRACTICAL] Cached %d AI tasks for video_id=%s", len(tasks), video_id)
+    except Exception as e:
+        logger.warning("[PRACTICAL] S3 cache write failed for %s: %s", video_id, e)
+
+
+_PRACTICAL_SYSTEM_PROMPT = (
+    "You are an expert AI/ML instructor designing hands-on coding exercises for students. "
+    "Output ONLY valid JSON — no markdown fences, no commentary. "
+    "Every task must be a concrete, runnable AI/ML practical that ties directly to the lecture content. "
+    "Each task must include real platform suggestions (Google Colab, Kaggle, HuggingFace), specific steps, "
+    "and learning outcomes. Match the lecture language in the description; keep code snippets in English."
+)
+
+
+def _build_practical_prompt(transcript: str, lecture_title: str = "") -> str:
+    title_line = f"Lecture title: {lecture_title}\n\n" if lecture_title else ""
+    return (
+        "Generate exactly 3 hands-on practical exercises based on the AI/ML lecture below.\n\n"
+        "===== CRITICAL RULES =====\n"
+        "1. Each task must be a SPECIFIC, ACTIONABLE coding exercise — not a theory question.\n"
+        "2. Reference what was actually taught in the lecture (concepts, libraries, datasets).\n"
+        "3. Suggest a real platform where the student can do it (Google Colab, Kaggle, HuggingFace Spaces).\n"
+        "4. Include 3-6 concrete steps in the 'steps' array.\n"
+        "5. Include optional starter_code (5-15 lines) when it helps the student get unstuck.\n"
+        "6. List 2-3 concrete learning_outcomes per task.\n"
+        "7. Return ONLY a valid JSON array of 3 objects.\n\n"
+        "===== EXAMPLE FORMAT =====\n"
+        '[\n'
+        '  {\n'
+        '    "title": "Build your first sentiment classifier with HuggingFace Transformers",\n'
+        '    "description": "Use a pretrained DistilBERT model to classify movie reviews from the IMDB dataset.",\n'
+        '    "steps": [\n'
+        '      "Open a new Google Colab notebook",\n'
+        '      "Install transformers and datasets via pip",\n'
+        '      "Load the IMDB dataset using datasets.load_dataset",\n'
+        '      "Initialise a sentiment-analysis pipeline",\n'
+        '      "Run it on 20 reviews and compare with the gold labels",\n'
+        '      "Print the accuracy"\n'
+        '    ],\n'
+        '    "platform_suggestion": "Google Colab",\n'
+        '    "starter_code": "from transformers import pipeline\\nfrom datasets import load_dataset\\nclf = pipeline(\\"sentiment-analysis\\")\\n# TODO: load IMDB and run clf on samples",\n'
+        '    "estimated_minutes": 45,\n'
+        '    "difficulty": "beginner",\n'
+        '    "learning_outcomes": [\n'
+        '      "Use a pretrained model with one line of code",\n'
+        '      "Understand the HuggingFace pipeline API",\n'
+        '      "Evaluate model accuracy on real data"\n'
+        '    ]\n'
+        '  }\n'
+        ']\n\n'
+        f"===== LECTURE TRANSCRIPT =====\n{title_line}{transcript[:8000]}"
+    )
+
+
+def _call_gemini_for_practicals(prompt: str, model: str, api_key: str) -> str:
+    """Call Google Gemini for practical generation. Returns raw text."""
+    import google.generativeai as genai
+
+    genai.configure(api_key=api_key)
+    gen_model = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=_PRACTICAL_SYSTEM_PROMPT,
+        generation_config={
+            "temperature": 0.4,
+            "max_output_tokens": 4000,
+            "response_mime_type": "application/json",
+        },
+    )
+    resp = gen_model.generate_content(prompt)
+    return (getattr(resp, "text", "") or "").strip()
+
+
+def _call_groq_for_practicals(prompt: str, groq_api_keys: list, model: str = "llama-3.3-70b-versatile") -> str:
+    """Fallback path: same Groq pattern as MCQ generation."""
+    from langchain_groq import ChatGroq
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    last_err = None
+    for key in groq_api_keys:
+        try:
+            llm = ChatGroq(
+                groq_api_key=key,
+                model_name=model,
+                temperature=0.4,
+                max_tokens=4000,
+                request_timeout=60,
+            )
+            resp = llm.invoke([
+                SystemMessage(content=_PRACTICAL_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ])
+            return (resp.content or "").strip()
+        except Exception as e:
+            last_err = e
+            logger.warning("[PRACTICAL] Groq key failed (%s): %s", model, e)
+            continue
+    raise ValueError(f"All Groq keys exhausted: {last_err}")
+
+
+def _parse_practicals_json(raw: str) -> list:
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+    raw = re.sub(r"\s*```$", "", raw, flags=re.MULTILINE).strip()
+    try:
+        tasks = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not m:
+            raise ValueError("Could not parse practical-tasks JSON from LLM response")
+        tasks = json.loads(m.group(0))
+    if not isinstance(tasks, list):
+        raise ValueError("LLM did not return a JSON array")
+    return tasks
+
+
+def _validate_practicals(tasks: list) -> List[dict]:
+    validated = []
+    for t in tasks[:3]:
+        if not isinstance(t, dict):
+            continue
+        title = str(t.get("title", "")).strip()
+        description = str(t.get("description", "")).strip()
+        steps = t.get("steps") or []
+        if not title or not description:
+            logger.warning("[PRACTICAL] Rejected task with empty title/description")
+            continue
+        if not isinstance(steps, list) or len(steps) < 2:
+            logger.warning("[PRACTICAL] Rejected task '%s' — too few steps", title[:40])
+            continue
+        learning_outcomes = t.get("learning_outcomes") or []
+        if not isinstance(learning_outcomes, list):
+            learning_outcomes = []
+        try:
+            minutes = int(t.get("estimated_minutes") or 30)
+        except (TypeError, ValueError):
+            minutes = 30
+        validated.append({
+            "title": title[:200],
+            "description": description[:800],
+            "steps": [str(s).strip() for s in steps if str(s).strip()][:8],
+            "platform_suggestion": str(t.get("platform_suggestion", "Google Colab")).strip(),
+            "starter_code": str(t.get("starter_code", "")).strip()[:2000],
+            "estimated_minutes": max(5, min(240, minutes)),
+            "difficulty": str(t.get("difficulty", "beginner")).strip().lower(),
+            "learning_outcomes": [str(o).strip() for o in learning_outcomes if str(o).strip()][:5],
+        })
+    return validated
+
+
+def generate_practical_tasks(
+    transcript: str,
+    video_id: str,
+    groq_api_keys: list,
+    gemini_api_key: str = "",
+    gemini_model: str = "gemini-2.5-flash",
+    lecture_title: str = "",
+    prompt_version: str = "2026-05-26a",
+    use_cache: bool = True,
+) -> List[dict]:
+    """Generate hands-on practical tasks from a lecture transcript.
+
+    Tries:
+      1. S3 cache (if use_cache=True and video_id given)
+      2. Gemini Flash (if gemini_api_key provided)
+      3. Groq Llama 3.3 70B (fallback)
+      4. Retry with stricter prompt if validation rejects most tasks
+
+    Returns a list of validated task dicts. Raises ValueError if all paths
+    fail or fewer than 1 task survives validation.
+    """
+    if not transcript or len(transcript) < 80:
+        raise ValueError("Transcript too short to generate practical tasks")
+
+    # Tier 1: cache
+    if use_cache and video_id:
+        cached = _load_practicals_from_cache(video_id, prompt_version)
+        if cached:
+            validated = _validate_practicals(cached)
+            if validated:
+                return validated
+
+    prompt = _build_practical_prompt(transcript, lecture_title)
+    raw = ""
+    last_err = None
+
+    # Tier 2: Gemini
+    if gemini_api_key:
+        try:
+            logger.info("[PRACTICAL] Generating via Gemini %s for video_id=%s", gemini_model, video_id)
+            raw = _call_gemini_for_practicals(prompt, gemini_model, gemini_api_key)
+        except Exception as e:
+            last_err = e
+            logger.warning("[PRACTICAL] Gemini failed, falling back to Groq: %s", e)
+            raw = ""
+
+    # Tier 3: Groq fallback
+    if not raw:
+        try:
+            raw = _call_groq_for_practicals(prompt, groq_api_keys)
+        except Exception as e:
+            raise ValueError(f"Both Gemini and Groq failed for practical generation: {last_err or e}")
+
+    try:
+        tasks = _parse_practicals_json(raw)
+        validated = _validate_practicals(tasks)
+    except Exception as e:
+        logger.warning("[PRACTICAL] Initial parse/validate failed: %s — retrying", e)
+        validated = []
+
+    # Retry once with stricter prompt if needed
+    if len(validated) < 2:
+        retry_prompt = (
+            "Your previous output was rejected because tasks were missing required fields "
+            "(title, description, or fewer than 2 steps). Try again — produce exactly 3 valid tasks.\n\n"
+            + prompt
+        )
+        try:
+            if gemini_api_key:
+                raw2 = _call_gemini_for_practicals(retry_prompt, gemini_model, gemini_api_key)
+            else:
+                raw2 = _call_groq_for_practicals(retry_prompt, groq_api_keys)
+            validated = _validate_practicals(_parse_practicals_json(raw2))
+        except Exception as e:
+            logger.warning("[PRACTICAL] Retry also failed: %s", e)
+
+    if not validated:
+        raise ValueError("Could not generate any valid practical tasks from this lecture")
+
+    # Save to cache for next time
+    if use_cache and video_id and validated:
+        _save_practicals_to_cache(video_id, prompt_version, validated)
+
+    return validated
+
+
+# ─── End AI practical generation ────────────────────────────────────────────
+
+
 def generate_summary(transcript: str, groq_api_keys: list) -> str:
     from langchain_groq import ChatGroq
     from langchain_core.messages import SystemMessage, HumanMessage

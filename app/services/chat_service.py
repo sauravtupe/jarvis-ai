@@ -452,6 +452,63 @@ class ChatService:
             self.save_chat_session(session_id)
             return
 
+        # --- Practical command detection (pre-brain shortcut, Feature 9) ---
+        # Runs BEFORE the practice-PDF block because it's more specific (needs class + chapter).
+        # If it doesn't match, the practice-PDF block (class-only) still handles class-wise queries.
+        from app.services import practical_service as _ps
+        _prac = _ps.match_practical_command(user_message, pending_youtube=_pending_yt)
+        if _prac is not None:
+            if _prac.get("_missing") == "class_chapter":
+                _resp = "Sure, Sir! Which class and chapter would you like practical exercises for? For example, say 'practical for class 6 chapter 1'."
+                self.sessions[session_id][-1].content = _resp
+                yield _resp
+                self.save_chat_session(session_id)
+                return
+
+            # Resolved class + chapter — build the practical bundle
+            try:
+                _bundle = _ps.build_practical_bundle(_prac["class_name"], _prac["chapter"])
+            except Exception as _e:
+                logger.warning("[PRACTICAL] bundle build failed for %s / %d: %s",
+                               _prac["class_name"], _prac["chapter"], _e)
+                _bundle = {
+                    "class_name": _prac["class_name"],
+                    "chapter": _prac["chapter"],
+                    "lecture": {},
+                    "curated": [],
+                    "class_pdfs": [],
+                }
+
+            yield {"_practicals": _bundle}
+
+            _class_display = "UKG" if _prac["class_name"] == "UKG" else f"Class {_prac['class_num']}"
+            _has_curated = bool(_bundle.get("curated"))
+            _has_pdfs = bool(_bundle.get("class_pdfs"))
+            _lecture_known = bool(_bundle.get("lecture", {}).get("video_id"))
+
+            if _has_curated or _lecture_known:
+                _resp = (
+                    f"Here are practical exercises for {_class_display} Chapter {_prac['chapter']}, Sir. "
+                    f"I've included AI-generated tasks for this lecture too."
+                ) if _lecture_known else (
+                    f"Here are practical exercises for {_class_display} Chapter {_prac['chapter']}, Sir."
+                )
+            elif _has_pdfs:
+                _resp = (
+                    f"Sir, no specific practicals are saved for {_class_display} Chapter {_prac['chapter']} yet, "
+                    f"but here are the general practice materials for {_class_display}."
+                )
+            else:
+                _resp = (
+                    f"Sir, no practical exercises are saved for {_class_display} Chapter {_prac['chapter']} yet. "
+                    f"They can be added from the Lectures admin panel."
+                )
+
+            self.sessions[session_id][-1].content = _resp
+            yield _resp
+            self.save_chat_session(session_id)
+            return
+
         # --- Practice PDF detection (pre-brain shortcut) ---
         import re as _re
         from app.services.practice_service import extract_class_from_message, list_pdfs_for_class

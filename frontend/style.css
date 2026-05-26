@@ -2618,3 +2618,172 @@ textarea { font-family: var(--font); color: var(--text); }
     .logo { font-size: 0.78rem !important; letter-spacing: 1px !important; }
     .settings-btn { display: none !important; }
 }
+
+
+/* ═══════════════ Feature 9 — Practical Exercises ═══════════════ */
+
+/* Practicals admin sub-drawer */
+.practicals-panel {
+    z-index: 26;  /* above lectures-panel which is 25 */
+}
+.practicals-context {
+    font-size: .85rem;
+    color: var(--text-dim);
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent, #6366f1);
+}
+.form-hint { font-size: .78rem; color: var(--text-dim); font-weight: 400; }
+.practical-item .lecture-item-info { flex: 1; min-width: 0; }
+.practical-desc {
+    font-size: .82rem;
+    color: var(--text-dim);
+    margin-top: 6px;
+    line-height: 1.45;
+}
+
+/* Practical bundle (student-facing card cluster) */
+.practical-bundle {
+    margin-top: 12px;
+    padding: 16px;
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+}
+.practical-bundle-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--glass-border);
+}
+.practical-bundle-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+}
+.practical-bundle-context {
+    font-size: .82rem;
+    color: var(--text-dim);
+}
+
+.practical-section { margin-top: 14px; }
+.practical-section:first-of-type { margin-top: 0; }
+.practical-section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: .88rem;
+    font-weight: 600;
+    color: var(--text);
+}
+.practical-section-icon { font-size: 1.1rem; }
+
+.practical-cards { display: flex; flex-direction: column; gap: 10px; }
+
+.practical-card {
+    padding: 12px 14px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    transition: border-color var(--transition);
+}
+.practical-card:hover { border-color: var(--glass-border-glow, rgba(255,255,255,0.15)); }
+.practical-ai-card { border-left: 3px solid #a855f7; }
+.practical-curated-card { border-left: 3px solid #22c55e; }
+
+.practical-card-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: .92rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+}
+.practical-card-desc {
+    font-size: .82rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin: 0 0 8px;
+}
+
+.practical-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: .68rem;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.08);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    white-space: nowrap;
+}
+.practical-platform { background: rgba(99,102,241,0.18); color: #c7d2fe; }
+.practical-time     { background: rgba(245,158,11,0.18); color: #fde68a; }
+.practical-difficulty-beginner    { background: rgba(34,197,94,0.18);  color: #bbf7d0; }
+.practical-difficulty-intermediate{ background: rgba(245,158,11,0.18); color: #fde68a; }
+.practical-difficulty-advanced    { background: rgba(239,68,68,0.18);  color: #fecaca; }
+
+.practical-steps, .practical-outcomes {
+    font-size: .82rem;
+    color: var(--text-dim);
+    margin-top: 8px;
+}
+.practical-steps ol, .practical-outcomes ul {
+    margin: 4px 0 0;
+    padding-left: 22px;
+    line-height: 1.55;
+}
+.practical-code {
+    margin: 10px 0;
+    padding: 10px 12px;
+    background: #0a0a14;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    font-size: .76rem;
+    color: #e0e0ff;
+    overflow-x: auto;
+    line-height: 1.4;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+.practical-code code { background: none; padding: 0; color: inherit; }
+
+.practical-open-link {
+    display: inline-block;
+    font-size: .82rem;
+    color: #93c5fd;
+    text-decoration: none;
+    margin-top: 6px;
+    padding: 4px 0;
+}
+.practical-open-link:hover { color: #60a5fa; text-decoration: underline; }
+
+.practical-loading {
+    font-size: .85rem;
+    color: var(--text-dim);
+    font-style: italic;
+    margin: 8px 0;
+}
+.practical-empty {
+    font-size: .85rem;
+    color: var(--text-dim);
+    margin: 8px 0;
+}
+.practical-cache-note {
+    font-size: .72rem;
+    color: var(--text-dim);
+    font-style: italic;
+    margin: 6px 0 0;
+    text-align: right;
+}
+.practical-pdf-list { display: flex; flex-direction: column; gap: 8px; }

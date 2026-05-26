@@ -29,6 +29,14 @@ for _cls in PRACTICE_CLASSES:
 LECTURES_JSON_PATH = BASE_DIR / "database" / "lectures.json"
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
+# Practical exercises (Feature 9)
+# Practicals live INSIDE lectures.json (no separate file). Only the AI-generated
+# task cache and config constants live here.
+PRACTICAL_AI_PROMPT_VERSION = "2026-05-26a"
+PRACTICAL_AI_CACHE_PREFIX = "practicals_ai_cache"  # S3 key prefix
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_PRACTICAL_MODEL = os.getenv("GEMINI_PRACTICAL_MODEL", "gemini-2.5-flash")
+
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
 
 # AWS S3 (Feature 3)

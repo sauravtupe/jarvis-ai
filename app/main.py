@@ -27,6 +27,8 @@ from app.models import (
     ClassroomAnalyseRequest,
     PracticeFile, PracticeListResponse,
     AdminLoginRequest, LectureCreate, LectureUpdate, LectureRecord, LectureListResponse,
+    PracticalCreate, PracticalRecord, PracticalBundle,
+    AIPracticalRequest, AIPracticalResponse, AIPracticalTask,
 )
 
 RATE_LIMIT_MESSAGE = (
@@ -50,6 +52,7 @@ from app.services.task_manager import TaskManager
 from app.services.upload_service import UploadService
 from app.services import quiz_service
 from app.services import lecture_service
+from app.services import practical_service
 from app.middleware.auth import get_optional_user
 from app.services.storage_service import (
     upload_bytes_to_s3, startup_restore_from_s3,
@@ -713,6 +716,11 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
                 yield from _yield_completed_audio()
                 continue
 
+            if isinstance(chunk, dict) and "_practicals" in chunk:
+                yield f"data: {json.dumps({'practicals': chunk['_practicals']})}\n\n"
+                yield from _yield_completed_audio()
+                continue
+
             if not chunk:
                 yield from _yield_completed_audio()
                 continue
@@ -1263,6 +1271,158 @@ async def delete_lecture_endpoint(
         return Response(status_code=204)
     except lecture_service.LectureError as e:
         raise _lecture_error_to_http(e)
+
+
+# ─── Feature 9 — Practical Exercises ────────────────────────────────────────
+
+
+def _practical_error_to_http(exc) -> HTTPException:
+    """Translate PracticalError or LectureError -> HTTPException."""
+    return HTTPException(status_code=getattr(exc, "status_code", 400), detail=str(exc))
+
+
+@app.get("/lectures/{class_name}/{chapter}/practicals", response_model=PracticalBundle)
+async def get_chapter_practicals(class_name: str, chapter: int):
+    """Public — returns curated practicals + class PDFs for a chapter.
+
+    AI-generated tasks are fetched separately via POST /practicals/generate.
+    """
+    try:
+        bundle = practical_service.build_practical_bundle(class_name, chapter)
+        return PracticalBundle(
+            class_name=bundle["class_name"],
+            chapter=bundle["chapter"],
+            lecture=bundle["lecture"],
+            curated=[PracticalRecord(**p) for p in bundle["curated"]],
+            class_pdfs=[PracticeFile(**f) for f in bundle["class_pdfs"]],
+        )
+    except (practical_service.PracticalError, lecture_service.LectureError) as e:
+        raise _practical_error_to_http(e)
+
+
+@app.post(
+    "/lectures/{class_name}/{chapter}/practicals",
+    response_model=PracticalRecord,
+    status_code=201,
+)
+async def create_practical(
+    class_name: str,
+    chapter: int,
+    request: PracticalCreate,
+    _: bool = Depends(require_admin),
+):
+    try:
+        rec = practical_service.add_practical(
+            class_name=class_name,
+            chapter=chapter,
+            payload=request.model_dump(),
+        )
+        return PracticalRecord(**rec)
+    except (practical_service.PracticalError, lecture_service.LectureError) as e:
+        raise _practical_error_to_http(e)
+
+
+@app.put(
+    "/lectures/{class_name}/{chapter}/practicals/{practical_id}",
+    response_model=PracticalRecord,
+)
+async def update_practical_endpoint(
+    class_name: str,
+    chapter: int,
+    practical_id: str,
+    request: PracticalCreate,
+    _: bool = Depends(require_admin),
+):
+    try:
+        rec = practical_service.update_practical(
+            class_name=class_name,
+            chapter=chapter,
+            practical_id=practical_id,
+            payload=request.model_dump(),
+        )
+        return PracticalRecord(**rec)
+    except (practical_service.PracticalError, lecture_service.LectureError) as e:
+        raise _practical_error_to_http(e)
+
+
+@app.delete(
+    "/lectures/{class_name}/{chapter}/practicals/{practical_id}",
+    status_code=204,
+)
+async def delete_practical_endpoint(
+    class_name: str,
+    chapter: int,
+    practical_id: str,
+    _: bool = Depends(require_admin),
+):
+    try:
+        practical_service.delete_practical(
+            class_name=class_name,
+            chapter=chapter,
+            practical_id=practical_id,
+        )
+        return Response(status_code=204)
+    except (practical_service.PracticalError, lecture_service.LectureError) as e:
+        raise _practical_error_to_http(e)
+
+
+@app.post("/practicals/generate", response_model=AIPracticalResponse)
+async def generate_ai_practicals(request: AIPracticalRequest):
+    """Generate hands-on practical tasks from the current pending_youtube transcript.
+
+    Public endpoint — anyone with a valid session can use it. Caching makes
+    repeated calls for the same video_id cheap.
+    """
+    if not chat_service:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    if not chat_service.validate_session_id(request.session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
+    pending = chat_service.get_session_metadata(request.session_id, "pending_youtube")
+    if not pending or pending.get("video_id") != request.video_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No transcript available for this video in your session. Open the video first.",
+        )
+    if pending.get("status") == "fetching":
+        raise HTTPException(status_code=202, detail="Transcript is still being processed. Please try again in a moment.")
+    transcript = pending.get("transcript")
+    if not transcript:
+        raise HTTPException(
+            status_code=422,
+            detail="Transcript not available — cannot generate practical tasks for this video.",
+        )
+
+    from config import GEMINI_API_KEY, GEMINI_PRACTICAL_MODEL, PRACTICAL_AI_PROMPT_VERSION
+
+    try:
+        # Try cache first (manual check so we know whether it was a hit)
+        cached_tasks = quiz_service._load_practicals_from_cache(
+            request.video_id, PRACTICAL_AI_PROMPT_VERSION
+        ) if request.use_cache else None
+        was_cached = bool(cached_tasks)
+
+        tasks = quiz_service.generate_practical_tasks(
+            transcript=transcript,
+            video_id=request.video_id,
+            groq_api_keys=GROQ_API_KEYS,
+            gemini_api_key=GEMINI_API_KEY,
+            gemini_model=GEMINI_PRACTICAL_MODEL,
+            lecture_title=pending.get("lecture_title", ""),
+            prompt_version=PRACTICAL_AI_PROMPT_VERSION,
+            use_cache=request.use_cache,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error("[PRACTICAL] AI generation failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"AI practical generation failed: {e}")
+
+    return AIPracticalResponse(
+        video_id=request.video_id,
+        tasks=[AIPracticalTask(**t) for t in tasks],
+        cached=was_cached,
+    )
 
 
 @app.post("/classroom/analyse")
