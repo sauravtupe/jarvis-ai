@@ -286,7 +286,15 @@ function _browserSpeak(text) {
     const utter = new SpeechSynthesisUtterance(text.slice(0, 4000));
     utter.lang = 'en-IN';
     utter.rate = 1.1;
-    utter.onerror = e => console.warn('[TTS] speechSynthesis error:', e.error);
+    // Mute the mic while the browser speaks — the audio comes through speakers
+    // and would otherwise leak into the mic and trigger a feedback loop.
+    let _markedSpeaking = false;
+    const _endSpeech = () => {
+        if (_markedSpeaking) { _markedSpeaking = false; _onJarvisSpeechEnd(); }
+    };
+    utter.onstart = () => { _onJarvisSpeechStart(); _markedSpeaking = true; };
+    utter.onend = _endSpeech;
+    utter.onerror = e => { console.warn('[TTS] speechSynthesis error:', e.error); _endSpeech(); };
     const setVoice = () => {
         const voices = window.speechSynthesis.getVoices();
         const v = voices.find(x => x.lang === 'en-IN') || voices.find(x => x.lang.startsWith('en-IN')) || voices.find(x => x.lang.startsWith('en'));
@@ -296,6 +304,7 @@ function _browserSpeak(text) {
             console.log('[TTS] speechSynthesis speaking, voice:', utter.voice ? utter.voice.name : 'default');
         } catch (e) {
             console.warn('[TTS] speechSynthesis.speak() threw:', e);
+            _endSpeech();
         }
     };
     if (window.speechSynthesis.getVoices().length > 0) { setVoice(); }
@@ -304,9 +313,10 @@ function _browserSpeak(text) {
 
 // POST to /tts endpoint and play returned audio on the pre-unlocked element.
 // Called from the per-message 🔊 button — guaranteed user gesture context.
-async function speakText(btn, text) {
+async function speakMessageButton(btn, text) {
     if (!text) return;
     if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+    let spoke = false;
     try {
         const res = await fetch(`${API}/tts`, {
             method: 'POST',
@@ -318,13 +328,17 @@ async function speakText(btn, text) {
         const url = URL.createObjectURL(blob);
         const audio = _ttsAudio || new Audio();
         if (!audio.paused) audio.pause();
-        audio.onended = () => { try { URL.revokeObjectURL(url); } catch (_) {} };
-        audio.onerror = () => { try { URL.revokeObjectURL(url); } catch (_) {} _browserSpeak(text); };
+        // Mute mic while this plays (defense against feedback loop).
+        _onJarvisSpeechStart();
+        spoke = true;
+        audio.onended = () => { try { URL.revokeObjectURL(url); } catch (_) {} _onJarvisSpeechEnd(); };
+        audio.onerror = () => { try { URL.revokeObjectURL(url); } catch (_) {} _onJarvisSpeechEnd(); _browserSpeak(text); };
         audio.src = url;
         audio.currentTime = 0;
-        audio.play().catch(() => { _browserSpeak(text); });
+        audio.play().catch(() => { _onJarvisSpeechEnd(); _browserSpeak(text); });
     } catch (e) {
-        console.warn('[speakText] backend failed:', e.message);
+        console.warn('[speakMessageButton] backend failed:', e.message);
+        if (spoke) _onJarvisSpeechEnd();
         _browserSpeak(text);
     } finally {
         if (btn) { setTimeout(() => { btn.disabled = false; btn.style.opacity = ''; }, 2000); }
@@ -342,7 +356,7 @@ function addSpeakButton(contentEl, text) {
     btn.title = 'Read response aloud';
     btn.setAttribute('aria-label', 'Read response aloud');
     btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
-    btn.addEventListener('click', (e) => { e.preventDefault(); speakText(btn, text); });
+    btn.addEventListener('click', (e) => { e.preventDefault(); speakMessageButton(btn, text); });
     contentEl.appendChild(btn);
 }
 
@@ -357,6 +371,11 @@ class TTSPlayer {
         this._currentSource = null;
         this._ctxUnlocked = false;
         this._didPlay = false;
+        // Lifecycle counter — bumps on every reset(). Used to cancel stale
+        // _browserSpeak fallback timers from previous streams so they don't
+        // re-speak old text after a new message has started.
+        this._lifecycleId = 0;
+        this._pendingFallbackTimers = [];
     }
     _initCtx() {
         if (this._ctx && this._ctx.state !== 'closed') return;
@@ -411,6 +430,17 @@ class TTSPlayer {
         this.stopped = false;
         this._didPlay = false;
         this._loopId = (this._loopId || 0) + 1;
+        // Bump the lifecycle counter — any pending fallback timers from the
+        // previous stream will see the new id and decline to fire.
+        this._lifecycleId = (this._lifecycleId || 0) + 1;
+        // Belt-and-braces: also clear the actual timer handles so the
+        // _browserSpeak callback can never fire after reset.
+        if (this._pendingFallbackTimers && this._pendingFallbackTimers.length) {
+            for (const id of this._pendingFallbackTimers) {
+                try { clearTimeout(id); } catch (_) {}
+            }
+            this._pendingFallbackTimers = [];
+        }
     }
     async _playLoop() {
         if (this.playing) return;
@@ -1316,12 +1346,18 @@ async function sendMessageWithImage(text, imgBase64) {
                 _browserSpeak(fullResponse);
             } else {
                 const _savedResp2 = fullResponse;
-                setTimeout(() => {
-                    if (ttsPlayer && !ttsPlayer._didPlay) {
-                        console.log('[TTS] audio not playing after 3s — browser fallback (vision)');
-                        _browserSpeak(_savedResp2);
-                    }
+                const _myLifecycle = ttsPlayer ? ttsPlayer._lifecycleId : -1;
+                const _timerId = setTimeout(() => {
+                    if (!ttsPlayer) return;
+                    // Stale guard: a newer message has started — don't re-speak old text.
+                    if (ttsPlayer._lifecycleId !== _myLifecycle) return;
+                    if (ttsPlayer._didPlay) return;
+                    console.log('[TTS] audio not playing after 3s — browser fallback (vision)');
+                    _browserSpeak(_savedResp2);
                 }, 3000);
+                if (ttsPlayer && ttsPlayer._pendingFallbackTimers) {
+                    ttsPlayer._pendingFallbackTimers.push(_timerId);
+                }
             }
         }
         const textSpan = contentEl.querySelector('.msg-stream-text');
@@ -1995,12 +2031,21 @@ async function sendMessage(textOverride) {
                 _browserSpeak(fullResponse);
             } else {
                 const _savedResp = fullResponse;
-                setTimeout(() => {
-                    if (ttsPlayer && !ttsPlayer._didPlay) {
-                        console.log('[TTS] audio received but not playing after 3s — browser fallback');
-                        _browserSpeak(_savedResp);
-                    }
+                const _myLifecycle = ttsPlayer ? ttsPlayer._lifecycleId : -1;
+                const _timerId = setTimeout(() => {
+                    if (!ttsPlayer) return;
+                    // Stale guard: ttsPlayer.reset() bumps _lifecycleId for every new
+                    // message. If we're now on a newer lifecycle, this fallback is
+                    // for stale text — don't speak it (would be a duplicate / wrong
+                    // voice playing the previous message).
+                    if (ttsPlayer._lifecycleId !== _myLifecycle) return;
+                    if (ttsPlayer._didPlay) return;
+                    console.log('[TTS] audio received but not playing after 3s — browser fallback');
+                    _browserSpeak(_savedResp);
                 }, 3000);
+                if (ttsPlayer && ttsPlayer._pendingFallbackTimers) {
+                    ttsPlayer._pendingFallbackTimers.push(_timerId);
+                }
             }
         }
         const textSpan = contentEl.querySelector('.msg-stream-text');
