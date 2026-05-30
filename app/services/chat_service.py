@@ -233,6 +233,7 @@ class ChatService:
 
     def _handle_youtube_video(
         self, session_id: str, video_id: str, full_url: Optional[str], friendly_text: Optional[str] = None,
+        lecture_title: str = "",
     ) -> Iterator[Union[str, Dict[str, Any]]]:
         """Shared YouTube-detection flow.
 
@@ -247,15 +248,17 @@ class ChatService:
             "video_id": video_id,
             "transcript": None,
             "status": "fetching",
+            "lecture_title": lecture_title,
         })
 
-        def _fetch_bg(_vid=video_id, _sid=session_id):
+        def _fetch_bg(_vid=video_id, _sid=session_id, _title=lecture_title):
             try:
                 _t = _qs.get_transcript(_vid)
                 self.set_session_metadata(_sid, "pending_youtube", {
                     "video_id": _vid,
                     "transcript": _t,
                     "status": "ready",
+                    "lecture_title": _title,
                 })
                 logger.info("[YOUTUBE] Background transcript ready for %s: %d chars", _vid, len(_t))
             except Exception as _e:
@@ -264,6 +267,7 @@ class ChatService:
                     "transcript": None,
                     "status": "failed",
                     "error": str(_e),
+                    "lecture_title": _title,
                 })
                 logger.warning("[YOUTUBE] Background transcript failed for %s: %s", _vid, _e)
 
@@ -398,7 +402,8 @@ class ChatService:
                 f"Watch the full video and come back when you're done."
             )
             yield from self._handle_youtube_video(
-                session_id, _lec["video_id"], _lec["youtube_url"], friendly_text=_friendly
+                session_id, _lec["video_id"], _lec["youtube_url"],
+                friendly_text=_friendly, lecture_title=_lec.get("title", ""),
             )
             return
 

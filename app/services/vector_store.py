@@ -32,7 +32,7 @@ class VectorStoreService:
 
         self.vector_store: Optional[FAISS] = None
 
-        self.retriever_cache: dict = {}
+        self._retriever_cache: dict = {}
         
     def load_learning_data(self) -> List[Document]:
         documents = []
@@ -107,7 +107,7 @@ class VectorStoreService:
             self.vector_store = FAISS.from_documents(chunks, self.embeddings)
             logger.info("[VECTOR] FAISS index built successfully with %d vectors", len(chunks))
 
-        self.retriever_cache.clear()
+        self._retriever_cache.clear()
         self.save_vector_store()
         return self.vector_store
 

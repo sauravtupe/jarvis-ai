@@ -26,11 +26,28 @@ let _speakAudio = null;
 // True while Jarvis is producing speech. Used to mute speech recognition so the
 // mic does not capture Jarvis's own voice and treat it as user input.
 let _jarvisSpeaking = false;
+// True if the *current* SpeechRecognition session captured Jarvis's voice at any
+// point. SpeechRecognition buffers audio and can finalize a capture *after* the
+// audio that caused it has stopped — so checking only `_jarvisSpeaking` at the
+// moment a result arrives misses Jarvis-voice captures that finalize a few
+// hundred ms after he stops. Once this flag is set, every result for the rest
+// of the recognition session is dropped; it resets only when startListening()
+// opens a fresh session.
+let _micCurrentSessionTainted = false;
 
 function _onJarvisSpeechStart() {
     _jarvisSpeaking = true;
     if (isListening) {
-        try { recognition && recognition.stop(); } catch (_) {}
+        // Mark the in-flight recognition session as tainted before we abort,
+        // so any result that slips through during the teardown is dropped.
+        _micCurrentSessionTainted = true;
+        try {
+            // abort() discards captured-but-not-yet-emitted speech. stop() would
+            // let those captures become "final" results after _jarvisSpeaking
+            // flips false, slipping through the gate and creating the loop.
+            if (recognition && recognition.abort) recognition.abort();
+            else if (recognition) recognition.stop();
+        } catch (_) {}
     }
 }
 
@@ -723,7 +740,12 @@ function initSpeech() {
     recognition.onresult = e => {
         if (!e.results || e.results.length === 0) return;
         // Drop anything the mic captured while Jarvis was speaking — this is Jarvis's own voice.
-        if (_jarvisSpeaking) {
+        // Also drop everything for the rest of this recognition session if Jarvis has
+        // ever spoken during it: the SpeechRecognition engine can finalize a capture
+        // *after* the audio that caused it ended, which would otherwise sneak Jarvis's
+        // own words through the gate as a "user message" and create a feedback loop.
+        if (_jarvisSpeaking || _micCurrentSessionTainted) {
+            if (_jarvisSpeaking) _micCurrentSessionTainted = true;
             if (speechWidgetText) speechWidgetText.textContent = '';
             return;
         }
@@ -822,11 +844,20 @@ function initSpeech() {
 
 function startListening() {
     if (!recognition || isStreaming || isListening) return;
+    // Refuse to start the mic while Jarvis is speaking (or has audio queued).
+    // Starting now would capture his own voice through the speakers and create a
+    // feedback loop. The mic click handler is supposed to stop TTS before calling
+    // this; the gate here catches code paths that don't (auto-restart, races).
+    const ttsActive = _jarvisSpeaking ||
+        (ttsPlayer && (ttsPlayer.playing || ttsPlayer.queue.length > 0));
+    if (ttsActive) return;
     if (isSafariOrIOS() && !safariVoiceHintShown) {
         showToast('Voice works best in Chrome. Safari has limited support.');
         safariVoiceHintShown = true;
     }
     isListening = true;
+    // Fresh recognition session — clear any taint carried from a previous one.
+    _micCurrentSessionTainted = false;
     pendingSendTranscript = null;
     clearTimeout(speechSendTimeout);
     speechSendTimeout = null;
@@ -1394,6 +1425,12 @@ async function checkHealth() {
 
 function showToast(msg, durationMs = 5000) {
     if (!toastContainer || !msg) return;
+    // Accept legacy callers that passed a category string (e.g. 'error') as the
+    // second arg; coerce it to a sensible default duration so the toast doesn't
+    // vanish instantly (setTimeout treats non-numeric durations as 0).
+    if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs <= 0) {
+        durationMs = 5000;
+    }
     const el = document.createElement('div');
     el.className = 'toast';
     el.textContent = msg;
@@ -1434,13 +1471,30 @@ function bindEvents() {
             autoListenMode = false;
             stopListening();
             if (micBtn) micBtn.classList.remove('auto-listen');
+            return;
+        }
+        autoListenMode = true;
+        speechErrorRetryCount = 0;
+        if (micBtn) {
+            micBtn.classList.add('auto-listen');
+            micBtn.title = 'Voice input — click to stop auto-listen';
+        }
+        // If Jarvis is currently speaking when the user clicks the mic, treat it
+        // as an "interrupt me, I want to talk" signal: stop Jarvis's audio,
+        // briefly wait for the speaker's audio buffer to drain (otherwise the
+        // tail of his last word leaks into the mic), then open the mic.
+        const ttsActive = _jarvisSpeaking ||
+            (ttsPlayer && (ttsPlayer.playing || ttsPlayer.queue.length > 0));
+        if (ttsActive) {
+            if (ttsPlayer) { ttsPlayer.stop(); ttsPlayer.stopped = false; }
+            try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (_) {}
+            // 400ms is long enough for the audio device to drain its buffer on
+            // both Chrome and Safari; short enough that the user doesn't notice
+            // a stall before the mic activates.
+            setTimeout(() => {
+                if (autoListenMode && !isListening) startListening();
+            }, 400);
         } else {
-            autoListenMode = true;
-            speechErrorRetryCount = 0;
-            if (micBtn) {
-                micBtn.classList.add('auto-listen');
-                micBtn.title = 'Voice input — click to stop auto-listen';
-            }
             startListening();
         }
     });

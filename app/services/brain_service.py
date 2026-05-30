@@ -531,13 +531,17 @@ Classify. Output EXACTLY ONE category name."""
                 response = llm.invoke(messages)
                 text = (response.content or "").strip()
                 return (text, "llm")
-            
+
             except Exception as e:
                 logger.warning("[BRAIN-TASK] Structured LLM failed: %s. Using rule-based.", e)
 
+        # Rule-based fallback: return task types with the raw user message attached
+        # as the query for each. Without this, _parse_task_decisions would emit
+        # tuples like ("open", "") and the user's "open youtube" intent would be
+        # lost — _extract_payload needs the original message to extract the URL.
         msg = user_content.split("User:")[-1].strip()[:500] if "User:" in user_content else user_content[:500]
         results = self._rule_based_task(msg)
-        fallback = ", ".join(results)
+        fallback = ", ".join(f"{r} {msg}" for r in results) if results else ""
         return (fallback, "rule-based")
 
     def _parse_task_decisions(self, raw_response: str) -> List[Tuple[str, str]]:

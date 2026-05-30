@@ -240,7 +240,8 @@ async def lifespan(app: FastAPI):
                 _tts_test_audio = _tts_test_fut.result(timeout=30)
                 if _tts_test_audio:
                     _engine = "Azure en-IN-PrabhatNeural (Indian male)" if _azure_ready else "OpenAI ash fallback"
-                    logger.info("  - TTS: Ready — %s, +volume, %d bytes", _engine, len(_tts_test_audio))
+                    _vol_label = f"+{_TTS_VOLUME_GAIN:.1f}x volume" if _TTS_VOLUME_GAIN != 1.0 else "native volume"
+                    logger.info("  - TTS: Ready — %s, %s, %d bytes", _engine, _vol_label, len(_tts_test_audio))
                 else:
                     logger.error("  - TTS: FAILED — both Azure and OpenAI returned empty audio")
             except Exception as _tts_e:
@@ -482,7 +483,8 @@ def _merge_short(sentences):
     return merged
 
 # Volume boost gain applied to all TTS output via ffmpeg post-processing.
-# 1.8x ≈ +5 dB. Increase if still too quiet, decrease if clipping is audible.
+# 1.0 = no boost (current default — user reported the native Azure voice is loud enough).
+# Raise (e.g. 1.5–1.8) only if a deployment has audibly quiet audio.
 _TTS_VOLUME_GAIN = 1.0
 
 
@@ -505,7 +507,7 @@ def _boost_volume(mp3_bytes: bytes, gain: float = _TTS_VOLUME_GAIN) -> bytes:
     return mp3_bytes
 
 
-def _azure_tts(text: str, voice: str = "en-IN-PrabhatNeural") -> bytes:
+def _azure_tts(text: str, voice: str = "en-IN-PrabhatNeural", rate: Optional[str] = None) -> bytes:
     """Azure AI Speech REST API — native Indian voices (PrabhatNeural / MadhurNeural).
 
     Requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION in environment.
@@ -518,7 +520,9 @@ def _azure_tts(text: str, voice: str = "en-IN-PrabhatNeural") -> bytes:
         return b""
 
     lang = "hi-IN" if voice.startswith("hi-IN") else "en-IN"
-    rate_pct = "+15%"  # matches OpenAI speed=1.15
+    # Honour the configured TTS_RATE (e.g. "+12%"). Fall back to +15% when caller
+    # passes None or empty so existing behaviour is preserved.
+    rate_pct = (rate or "").strip() or "+15%"
     escaped = _html.escape(text)
     ssml = (
         f'<speak version="1.0" xml:lang="{lang}" '
@@ -567,11 +571,11 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
     """Two-tier TTS:
        1. Azure AI Speech with en-IN-PrabhatNeural (user's preferred Indian voice)
        2. OpenAI gpt-4o-mini-tts with 'ash' as fallback if Azure not configured/fails
-    Result passed through volume boost (+1.8x) before returning.
+    Volume boost is applied only when `_TTS_VOLUME_GAIN != 1.0`; defaults to no-op.
     """
     # Tier 1: Azure (native Indian voice — preferred when configured)
     azure_voice = voice if voice and voice.endswith("Neural") else "en-IN-PrabhatNeural"
-    audio = _azure_tts(text, azure_voice)
+    audio = _azure_tts(text, azure_voice, rate=rate)
     if audio:
         return _boost_volume(audio)
 
@@ -598,7 +602,7 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         audio = response.content
         if audio:
             audio = _boost_volume(audio)
-            logger.info("[TTS] OpenAI gpt-4o-mini-tts OK voice=ash len=%d (volume +%.1fx)", len(audio), _TTS_VOLUME_GAIN)
+            logger.info("[TTS] OpenAI gpt-4o-mini-tts OK voice=ash len=%d (gain=%.1fx)", len(audio), _TTS_VOLUME_GAIN)
             return audio
         logger.warning("[TTS] OpenAI gpt-4o-mini-tts returned empty audio — trying tts-1")
     except Exception as e:
@@ -618,7 +622,7 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         audio = response.content
         if audio:
             audio = _boost_volume(audio)
-            logger.info("[TTS] OpenAI tts-1 fallback OK voice=ash len=%d (volume +%.1fx)", len(audio), _TTS_VOLUME_GAIN)
+            logger.info("[TTS] OpenAI tts-1 fallback OK voice=ash len=%d (gain=%.1fx)", len(audio), _TTS_VOLUME_GAIN)
             return audio
         logger.error("[TTS] OpenAI tts-1 fallback also returned empty audio")
     except Exception as e:
@@ -1448,7 +1452,9 @@ async def text_to_speech(request: TTSRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
 
-    loop = asyncio.get_event_loop()
+    # get_running_loop() is the supported replacement for get_event_loop() in
+    # Python 3.12+ inside async handlers — and we're guaranteed to be inside one here.
+    loop = asyncio.get_running_loop()
     audio = await loop.run_in_executor(
         _tts_pool,
         _generate_tts_sync,

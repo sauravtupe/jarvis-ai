@@ -137,5 +137,5 @@ class VisionService:
             if "content_policy" in err_str or "safety" in err_str:
                 logger.warning("[VISION] Groq content policy: %s", e)
                 return "The image couldn't be analyzed due to content guidelines."
-            logger.warning("[VISOIN] Groq vision error: %s", e)
+            logger.warning("[VISION] Groq vision error: %s", e)
         return None

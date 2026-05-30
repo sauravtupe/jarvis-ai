@@ -115,7 +115,7 @@ class RealtimeGroqService(GroqService):
             logger.warning("[REALTIME] Query extraction failed (%s), using raw question", e)
             return question
 
-    def search_tavily(self, query: str, num_results: int = 5) -> str:
+    def search_tavily(self, query: str, num_results: int = 5) -> Tuple[str, Optional[dict]]:
 
         if not self.tavily_client:
             logger.warning("Tavily client not initialized. TAVILY_API_KEY not set.")
@@ -243,7 +243,8 @@ class RealtimeGroqService(GroqService):
                     "[REALTIME] Pre-fetch: Tavily returned %d chars in %.3fs total",
                     len(formatted_results), time.perf_counter() - t0
                 )
-                return (formatted_results or "", payload)
+                return (formatted_results, payload)
+            return ("", payload)
 
         except Exception as e:
             logger.warning("[REALTIME] Pre-fetch failed: %s", e)
