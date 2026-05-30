@@ -308,89 +308,21 @@
                 <button class="lectures-close btn-icon" id="practicals-back" title="Back to lectures" aria-label="Back">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
                 </button>
-                <h3 class="lectures-title" id="practicals-panel-title">Manage Practicals</h3>
-                <button class="lectures-close btn-icon" id="practicals-close" title="Close" aria-label="Close practicals">
+                <h3 class="lectures-title" id="practicals-panel-title">Practice</h3>
+                <button class="lectures-close btn-icon" id="practicals-close" title="Close" aria-label="Close practice">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
             </div>
             <div class="lectures-body">
                 <p class="practicals-context" id="practicals-context"></p>
-                <button class="btn-primary lectures-add-btn" id="practicals-add-btn">+ Add Practical</button>
-
-                <div class="lecture-form" id="practical-form" style="display:none">
-                    <h4 class="lecture-form-title" id="practical-form-title">Add Practical</h4>
-                    <input type="hidden" id="practical-form-mode" value="add">
-                    <input type="hidden" id="practical-form-id" value="">
-                    <div class="lecture-form-row">
-                        <label for="practical-title">Title</label>
-                        <input type="text" id="practical-title" maxlength="120" placeholder="e.g. Hello AI in Colab">
-                    </div>
-                    <div class="lecture-form-row">
-                        <label for="practical-url">URL</label>
-                        <input type="text" id="practical-url" placeholder="https://colab.research.google.com/...">
-                    </div>
-                    <div class="lecture-form-row">
-                        <label for="practical-platform">Platform</label>
-                        <select id="practical-platform">
-                            <option value="Google Colab">Google Colab</option>
-                            <option value="Kaggle">Kaggle</option>
-                            <option value="HuggingFace">HuggingFace</option>
-                            <option value="GitHub">GitHub</option>
-                            <option value="GitLab">GitLab</option>
-                            <option value="Codepen">Codepen</option>
-                            <option value="Replit">Replit</option>
-                            <option value="Jupyter">Jupyter</option>
-                            <option value="Deepnote">Deepnote</option>
-                            <option value="Paperspace">Paperspace</option>
-                            <option value="Coursera">Coursera</option>
-                            <option value="edX">edX</option>
-                            <option value="Udacity">Udacity</option>
-                            <option value="fast.ai">fast.ai</option>
-                            <option value="YouTube">YouTube</option>
-                            <option value="Other">Other</option>
-                        </select>
-                    </div>
-                    <div class="lecture-form-row">
-                        <label for="practical-type">Type</label>
-                        <select id="practical-type">
-                            <option value="notebook">Notebook</option>
-                            <option value="dataset">Dataset</option>
-                            <option value="tutorial">Tutorial</option>
-                            <option value="challenge">Challenge</option>
-                            <option value="project">Project</option>
-                            <option value="video-followup">Video Follow-up</option>
-                        </select>
-                    </div>
-                    <div class="lecture-form-row">
-                        <label for="practical-difficulty">Difficulty</label>
-                        <select id="practical-difficulty">
-                            <option value="beginner">Beginner</option>
-                            <option value="intermediate">Intermediate</option>
-                            <option value="advanced">Advanced</option>
-                        </select>
-                    </div>
-                    <div class="lecture-form-row">
-                        <label for="practical-minutes">Estimated minutes</label>
-                        <input type="number" id="practical-minutes" min="1" max="600" placeholder="30" value="30">
-                    </div>
-                    <div class="lecture-form-row">
-                        <label for="practical-description">Description</label>
-                        <textarea id="practical-description" maxlength="500" rows="3" placeholder="What will the student do? (1–2 sentences)"></textarea>
-                    </div>
-                    <div class="lecture-form-row">
-                        <label for="practical-tags">Tags <span class="form-hint">(comma-separated, optional)</span></label>
-                        <input type="text" id="practical-tags" placeholder="e.g. regression, sklearn, beginner">
-                    </div>
-                    <p class="lecture-form-error" id="practical-form-error" style="display:none"></p>
-                    <div class="lecture-form-actions">
-                        <button class="btn-secondary" id="practical-form-cancel">Cancel</button>
-                        <button class="btn-primary" id="practical-form-save">Save</button>
-                    </div>
+                <p class="practice-admin-hint">Jarvis generates age-appropriate practice from this lesson. Review it, drop any you don't want, then save it for your students.</p>
+                <div class="practice-admin-toolbar">
+                    <button class="btn-primary" id="practice-generate-btn">✨ Generate Practice</button>
+                    <button class="btn-primary" id="practice-save-btn" style="display:none">Save for students</button>
+                    <button class="btn-secondary" id="practice-clear-btn" style="display:none">Clear saved</button>
                 </div>
-
-                <div class="lectures-list" id="practicals-list">
-                    <p class="lectures-empty" id="practicals-empty">No practicals yet. Click "+ Add Practical" to add one.</p>
-                </div>
+                <p class="practice-admin-status" id="practice-admin-status"></p>
+                <div class="practical-cards" id="practice-admin-cards"></div>
             </div>
         </div>
 

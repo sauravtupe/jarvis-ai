@@ -602,86 +602,149 @@ def generate_mcqs(transcript: str, groq_api_keys: list) -> List[dict]:
 # ─── AI-generated practical tasks (Feature 9) ───────────────────────────────
 
 
-def _practical_cache_key(video_id: str, prompt_version: str) -> str:
-    """S3 key for cached AI-generated tasks. Versioned so prompt changes invalidate."""
+def _practical_cache_key(video_id: str, prompt_version: str, class_name: str = "") -> str:
+    """S3 key for cached AI-generated tasks. Versioned so prompt changes invalidate.
+
+    class_name is part of the key because the same video could (in theory) be
+    catalogued at different grades, and the output is grade-specific.
+    """
     safe_vid = re.sub(r"[^a-zA-Z0-9_-]", "_", video_id or "unknown")
-    return f"practicals_ai_cache/{prompt_version}/{safe_vid}.json"
+    safe_cls = re.sub(r"[^a-zA-Z0-9_-]", "_", class_name or "any")
+    return f"practicals_ai_cache/{prompt_version}/{safe_cls}/{safe_vid}.json"
 
 
-def _load_practicals_from_cache(video_id: str, prompt_version: str) -> Optional[List[dict]]:
+def _load_practicals_from_cache(video_id: str, prompt_version: str, class_name: str = "") -> Optional[List[dict]]:
     try:
         from app.services.storage_service import download_from_s3
     except Exception:
         return None
     try:
-        data = download_from_s3(_practical_cache_key(video_id, prompt_version))
+        data = download_from_s3(_practical_cache_key(video_id, prompt_version, class_name))
         if not data:
             return None
         tasks = json.loads(data.decode("utf-8"))
         if isinstance(tasks, list) and tasks:
-            logger.info("[PRACTICAL] AI cache HIT for video_id=%s (%d tasks)", video_id, len(tasks))
+            logger.info("[PRACTICAL] AI cache HIT for video_id=%s class=%s (%d tasks)", video_id, class_name, len(tasks))
             return tasks
     except Exception as e:
         logger.debug("[PRACTICAL] AI cache miss / read error for %s: %s", video_id, e)
     return None
 
 
-def _save_practicals_to_cache(video_id: str, prompt_version: str, tasks: List[dict]) -> None:
+def _save_practicals_to_cache(video_id: str, prompt_version: str, tasks: List[dict], class_name: str = "") -> None:
     try:
         from app.services.storage_service import upload_bytes_to_s3
         payload = json.dumps(tasks, ensure_ascii=False, indent=2).encode("utf-8")
-        upload_bytes_to_s3(payload, _practical_cache_key(video_id, prompt_version), content_type="application/json")
-        logger.info("[PRACTICAL] Cached %d AI tasks for video_id=%s", len(tasks), video_id)
+        upload_bytes_to_s3(payload, _practical_cache_key(video_id, prompt_version, class_name), content_type="application/json")
+        logger.info("[PRACTICAL] Cached %d AI tasks for video_id=%s class=%s", len(tasks), video_id, class_name)
     except Exception as e:
         logger.warning("[PRACTICAL] S3 cache write failed for %s: %s", video_id, e)
 
 
 _PRACTICAL_SYSTEM_PROMPT = (
-    "You are an expert AI/ML instructor designing hands-on coding exercises for students. "
+    "You are an expert teacher who designs age-appropriate practice activities for students "
+    "from UKG (age 4) through Grade 12 (age 18). You adapt the activity type, the complexity "
+    "of the language, and the format to the learner's age and to what the lesson actually taught. "
+    "You NEVER give coding tasks to young children, and you only give coding tasks at all when "
+    "the lesson itself teaches coding. "
     "Output ONLY valid JSON — no markdown fences, no commentary. "
-    "Every task must be a concrete, runnable AI/ML practical that ties directly to the lecture content. "
-    "Each task must include real platform suggestions (Google Colab, Kaggle, HuggingFace), specific steps, "
-    "and learning outcomes. Match the lecture language in the description; keep code snippets in English."
+    "Write all student-facing text in the SAME language as the lecture transcript "
+    "(if the lecture is in Hindi, write the activities in Hindi)."
 )
 
 
-def _build_practical_prompt(transcript: str, lecture_title: str = "") -> str:
-    title_line = f"Lecture title: {lecture_title}\n\n" if lecture_title else ""
+# Two contrasting few-shot examples so the model sees the full range — a UKG
+# non-coding activity and a senior coding task. Kept as a constant to avoid
+# rebuilding the (long) string on every call.
+_PRACTICAL_EXAMPLE_BLOCK = (
+    "===== EXAMPLE — YOUNG LEARNER (UKG, NO CODING) =====\n"
+    '[\n'
+    '  {\n'
+    '    "title": "Spot the Robot at Home",\n'
+    '    "activity_type": "observation",\n'
+    '    "description": "With a grown-up, look around your home and find three machines that can '
+    'help people, like a washing machine or a toy robot.",\n'
+    '    "steps": ["Walk around your home with a grown-up", "Point to 3 machines that help us", '
+    '"Say out loud what each one does"],\n'
+    '    "materials": ["a grown-up to help"],\n'
+    '    "resources": [],\n'
+    '    "estimated_minutes": 10,\n'
+    '    "difficulty": "beginner",\n'
+    '    "learning_outcomes": ["Notice machines in daily life", "Talk about what machines do"]\n'
+    '  }\n'
+    ']\n\n'
+    "===== EXAMPLE — SENIOR LEARNER (Grade 11, CODING TAUGHT) =====\n"
+    '[\n'
+    '  {\n'
+    '    "title": "Train a simple image classifier",\n'
+    '    "activity_type": "coding",\n'
+    '    "description": "Use a small dataset to train and evaluate an image classifier in a notebook.",\n'
+    '    "steps": ["Open a new Google Colab notebook", "Load a small image dataset", '
+    '"Train a simple model", "Evaluate accuracy on a test split"],\n'
+    '    "platform_suggestion": "Google Colab",\n'
+    '    "starter_code": "import tensorflow as tf\\n# TODO: load dataset and build a small model",\n'
+    '    "resources": [{"label": "Google Colab", "url": "https://colab.research.google.com"}],\n'
+    '    "estimated_minutes": 45,\n'
+    '    "difficulty": "intermediate",\n'
+    '    "learning_outcomes": ["Build and train a model", "Evaluate model accuracy"]\n'
+    '  }\n'
+    ']\n\n'
+)
+
+
+def _build_practical_prompt(transcript: str, lecture_title: str = "", class_name: str = "") -> str:
+    """Build the grade/age/lesson-aware practice-generation prompt.
+
+    The age band (from config.band_for_class) controls the allowed activity
+    types, tone, reading level, and whether coding is even permitted.
+    """
+    from config import band_for_class
+
+    band = band_for_class(class_name)
+    title_line = f"Lecture title: {lecture_title}\n" if lecture_title else ""
+    allowed = ", ".join(band["allowed_activity_types"])
+
+    if band["coding_allowed"]:
+        coding_rule = (
+            "5. CODING GATE: You MAY include coding tasks (activity_type \"coding\" with optional "
+            "starter_code and a platform_suggestion) ONLY IF the lecture transcript actually teaches "
+            "programming/coding. If the lesson is conceptual (no coding taught), do NOT produce code — "
+            "use the other activity types instead.\n"
+        )
+    else:
+        coding_rule = (
+            "5. CODING GATE: This learner is too young for programming. NEVER output coding tasks, "
+            "starter_code, or developer platforms (Colab/Kaggle/etc.). Leave starter_code empty and "
+            "do not use activity_type \"coding\" under any circumstances.\n"
+        )
+
     return (
-        "Generate exactly 3 hands-on practical exercises based on the AI/ML lecture below.\n\n"
+        f"Generate exactly 3 practice activities based on the lesson below, tailored for this learner.\n\n"
+        f"===== LEARNER PROFILE =====\n"
+        f"Grade band: {band['label']} (age {band['age_range']})\n"
+        f"Reading level: {band['reading_level']}\n"
+        f"Tone: {band['tone']}\n"
+        f"Allowed activity types: {allowed}\n"
+        f"Pedagogy guidance: {band['guidance']}\n\n"
         "===== CRITICAL RULES =====\n"
-        "1. Each task must be a SPECIFIC, ACTIONABLE coding exercise — not a theory question.\n"
-        "2. Reference what was actually taught in the lecture (concepts, libraries, datasets).\n"
-        "3. Suggest a real platform where the student can do it (Google Colab, Kaggle, HuggingFace Spaces).\n"
-        "4. Include 3-6 concrete steps in the 'steps' array.\n"
-        "5. Include optional starter_code (5-15 lines) when it helps the student get unstuck.\n"
-        "6. List 2-3 concrete learning_outcomes per task.\n"
-        "7. Return ONLY a valid JSON array of 3 objects.\n\n"
-        "===== EXAMPLE FORMAT =====\n"
-        '[\n'
-        '  {\n'
-        '    "title": "Build your first sentiment classifier with HuggingFace Transformers",\n'
-        '    "description": "Use a pretrained DistilBERT model to classify movie reviews from the IMDB dataset.",\n'
-        '    "steps": [\n'
-        '      "Open a new Google Colab notebook",\n'
-        '      "Install transformers and datasets via pip",\n'
-        '      "Load the IMDB dataset using datasets.load_dataset",\n'
-        '      "Initialise a sentiment-analysis pipeline",\n'
-        '      "Run it on 20 reviews and compare with the gold labels",\n'
-        '      "Print the accuracy"\n'
-        '    ],\n'
-        '    "platform_suggestion": "Google Colab",\n'
-        '    "starter_code": "from transformers import pipeline\\nfrom datasets import load_dataset\\nclf = pipeline(\\"sentiment-analysis\\")\\n# TODO: load IMDB and run clf on samples",\n'
-        '    "estimated_minutes": 45,\n'
-        '    "difficulty": "beginner",\n'
-        '    "learning_outcomes": [\n'
-        '      "Use a pretrained model with one line of code",\n'
-        '      "Understand the HuggingFace pipeline API",\n'
-        '      "Evaluate model accuracy on real data"\n'
-        '    ]\n'
-        '  }\n'
-        ']\n\n'
-        f"===== LECTURE TRANSCRIPT =====\n{title_line}{transcript[:8000]}"
+        "1. Each activity MUST be doable by a learner of this exact age — match the reading level and tone.\n"
+        "2. Tie each activity to what the lesson ACTUALLY taught (concepts, examples, vocabulary).\n"
+        "3. Choose an activity_type from the allowed list above that best fits the lesson and age.\n"
+        "4. Include 2-6 short, concrete 'steps'. For young children, write steps a grown-up can read aloud.\n"
+        f"{coding_rule}"
+        "6. If an external website/video/game helps, add it to 'resources' as {label,url} (https only). "
+        "Otherwise use an empty resources array.\n"
+        "7. List 2-3 plain-language learning_outcomes per activity.\n"
+        "8. Write ALL student-facing text in the SAME language as the transcript.\n"
+        "9. Return ONLY a valid JSON array of exactly 3 objects — no markdown, no commentary.\n\n"
+        "===== TASK OBJECT FIELDS =====\n"
+        "title (string), activity_type (string from allowed list), description (string), "
+        "steps (string[]), materials (string[], optional — e.g. crayons/paper), "
+        "resources ([{label,url}], optional), platform_suggestion (string, coding only), "
+        "starter_code (string, coding only — else \"\"), estimated_minutes (int), "
+        "difficulty (\"beginner\"|\"intermediate\"|\"advanced\"), learning_outcomes (string[]).\n\n"
+        f"{_PRACTICAL_EXAMPLE_BLOCK}"
+        f"===== LESSON TRANSCRIPT =====\n{title_line}{transcript[:8000]}"
     )
 
 
@@ -745,7 +808,34 @@ def _parse_practicals_json(raw: str) -> list:
     return tasks
 
 
-def _validate_practicals(tasks: list) -> List[dict]:
+def _sanitize_resources(raw) -> List[dict]:
+    """Normalize a resources list into [{label, url}] with https/http-only URLs."""
+    out = []
+    if not isinstance(raw, list):
+        return out
+    for r in raw[:6]:
+        if not isinstance(r, dict):
+            continue
+        url = str(r.get("url", "")).strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        label = str(r.get("label", "") or url).strip()[:80]
+        out.append({"label": label, "url": url[:500]})
+    return out
+
+
+def _validate_practicals(tasks: list, class_name: str = "") -> List[dict]:
+    """Validate + normalize generated tasks. Enforces the coding gate server-side:
+    for non-coding age bands, strips starter_code/platform and rewrites any
+    'coding' activity_type to a safe default — even if the model ignored the prompt.
+    """
+    from config import band_for_class
+
+    band = band_for_class(class_name)
+    coding_allowed = band["coding_allowed"]
+    allowed_types = set(band["allowed_activity_types"])
+    fallback_type = band["allowed_activity_types"][0] if band["allowed_activity_types"] else "project"
+
     validated = []
     for t in tasks[:3]:
         if not isinstance(t, dict):
@@ -762,16 +852,39 @@ def _validate_practicals(tasks: list) -> List[dict]:
         learning_outcomes = t.get("learning_outcomes") or []
         if not isinstance(learning_outcomes, list):
             learning_outcomes = []
+        materials = t.get("materials") or []
+        if not isinstance(materials, list):
+            materials = []
         try:
             minutes = int(t.get("estimated_minutes") or 30)
         except (TypeError, ValueError):
             minutes = 30
+
+        activity_type = str(t.get("activity_type", "")).strip().lower() or fallback_type
+        starter_code = str(t.get("starter_code", "")).strip()
+        platform = str(t.get("platform_suggestion", "")).strip()
+
+        # ── Coding gate (server-side enforcement) ──
+        if not coding_allowed:
+            if activity_type == "coding":
+                logger.info("[PRACTICAL] Coding stripped for non-coding band (%s) — task '%s'",
+                            band["label"], title[:40])
+                activity_type = fallback_type
+            starter_code = ""
+            platform = ""
+        # Keep activity_type sensible: fall back if the model invented one outside the band
+        if activity_type not in allowed_types and activity_type != "coding":
+            activity_type = fallback_type
+
         validated.append({
             "title": title[:200],
+            "activity_type": activity_type,
             "description": description[:800],
             "steps": [str(s).strip() for s in steps if str(s).strip()][:8],
-            "platform_suggestion": str(t.get("platform_suggestion", "Google Colab")).strip(),
-            "starter_code": str(t.get("starter_code", "")).strip()[:2000],
+            "materials": [str(m).strip() for m in materials if str(m).strip()][:8],
+            "resources": _sanitize_resources(t.get("resources")),
+            "platform_suggestion": platform,
+            "starter_code": starter_code[:2000],
             "estimated_minutes": max(5, min(240, minutes)),
             "difficulty": str(t.get("difficulty", "beginner")).strip().lower(),
             "learning_outcomes": [str(o).strip() for o in learning_outcomes if str(o).strip()][:5],
@@ -786,10 +899,14 @@ def generate_practical_tasks(
     gemini_api_key: str = "",
     gemini_model: str = "gemini-2.5-flash",
     lecture_title: str = "",
+    class_name: str = "",
     prompt_version: str = "2026-05-26a",
     use_cache: bool = True,
 ) -> List[dict]:
-    """Generate hands-on practical tasks from a lecture transcript.
+    """Generate age/grade/lesson-aware practice activities from a lecture transcript.
+
+    class_name (UKG / class_1 … class_12) selects the age band that controls the
+    activity types, language level, and whether coding is permitted at all.
 
     Tries:
       1. S3 cache (if use_cache=True and video_id given)
@@ -801,24 +918,25 @@ def generate_practical_tasks(
     fail or fewer than 1 task survives validation.
     """
     if not transcript or len(transcript) < 80:
-        raise ValueError("Transcript too short to generate practical tasks")
+        raise ValueError("Transcript too short to generate practice activities")
 
     # Tier 1: cache
     if use_cache and video_id:
-        cached = _load_practicals_from_cache(video_id, prompt_version)
+        cached = _load_practicals_from_cache(video_id, prompt_version, class_name)
         if cached:
-            validated = _validate_practicals(cached)
+            validated = _validate_practicals(cached, class_name)
             if validated:
                 return validated
 
-    prompt = _build_practical_prompt(transcript, lecture_title)
+    prompt = _build_practical_prompt(transcript, lecture_title, class_name)
     raw = ""
     last_err = None
 
     # Tier 2: Gemini
     if gemini_api_key:
         try:
-            logger.info("[PRACTICAL] Generating via Gemini %s for video_id=%s", gemini_model, video_id)
+            logger.info("[PRACTICAL] Generating via Gemini %s for video_id=%s class=%s",
+                        gemini_model, video_id, class_name)
             raw = _call_gemini_for_practicals(prompt, gemini_model, gemini_api_key)
         except Exception as e:
             last_err = e
@@ -830,11 +948,11 @@ def generate_practical_tasks(
         try:
             raw = _call_groq_for_practicals(prompt, groq_api_keys)
         except Exception as e:
-            raise ValueError(f"Both Gemini and Groq failed for practical generation: {last_err or e}")
+            raise ValueError(f"Both Gemini and Groq failed for practice generation: {last_err or e}")
 
     try:
         tasks = _parse_practicals_json(raw)
-        validated = _validate_practicals(tasks)
+        validated = _validate_practicals(tasks, class_name)
     except Exception as e:
         logger.warning("[PRACTICAL] Initial parse/validate failed: %s — retrying", e)
         validated = []
@@ -851,16 +969,16 @@ def generate_practical_tasks(
                 raw2 = _call_gemini_for_practicals(retry_prompt, gemini_model, gemini_api_key)
             else:
                 raw2 = _call_groq_for_practicals(retry_prompt, groq_api_keys)
-            validated = _validate_practicals(_parse_practicals_json(raw2))
+            validated = _validate_practicals(_parse_practicals_json(raw2), class_name)
         except Exception as e:
             logger.warning("[PRACTICAL] Retry also failed: %s", e)
 
     if not validated:
-        raise ValueError("Could not generate any valid practical tasks from this lecture")
+        raise ValueError("Could not generate any valid practice activities from this lesson")
 
     # Save to cache for next time
     if use_cache and video_id and validated:
-        _save_practicals_to_cache(video_id, prompt_version, validated)
+        _save_practicals_to_cache(video_id, prompt_version, validated, class_name)
 
     return validated
 

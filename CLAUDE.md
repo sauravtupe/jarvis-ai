@@ -31,7 +31,7 @@ Use `user_id = 'test-user-001'` as placeholder everywhere user data is saved. Wh
 | YouTube MCQ | Working (English + Hindi MCQs, transcript fallback chain) |
 | Classroom AI | Not built |
 | Lecture Catalog + Admin Panel | Working (Class → Chapter, S3-backed, bilingual voice commands) |
-| Practical Exercises | Not built |
+| Practice (age/grade/lesson-aware, teacher-generated) | Working (UKG→Grade 12 age bands, coding gate Grade 6+ only if taught) |
 | 3D UI + Avatar | Not built |
 
 ---
@@ -134,7 +134,7 @@ Always use `/chat/jarvis/stream` as the single main endpoint — never call mode
 **Pre-brain shortcuts** in `chat_service.process_message_stream()` run *before* brain routing and short-circuit the flow for known patterns:
 - **YouTube URL detection** — if the user pastes a YouTube link, set `pending_youtube` + yield `_youtube_detected`, skip brain.
 - **Lecture command** *(Feature 8)* — if the message matches `match_lecture_command()` (e.g. *"open class 5 chapter 3"* or *"क्लास 5 चैप्टर 3 खोलो"*), look up `database/lectures.json` and fall through into the same YouTube flow. Brain is never invoked.
-- **Practical command** *(Feature 9)* — if `match_practical_command()` fires (e.g. *"practical for class 6 chapter 1"* / *"क्लास 6 चैप्टर 1 का प्रैक्टिकल"*), serve the 3-layer bundle (curated links + AI-generated tasks + class PDFs), skip brain.
+- **Practice command** *(Feature 9)* — if `match_practical_command()` fires (e.g. *"practice for class 6 chapter 1"* / *"क्लास 6 चैप्टर 1 का प्रैक्टिकल"*), serve the bundle (teacher-saved `practice_tasks` + legacy curated links + class PDFs), skip brain. Practice is **teacher-generated** (admin Lecture Panel → Generate Practice → Save); it's age/grade/lesson-aware and coding only appears at Grade 6+ when the lesson teaches it.
 - **Practice PDF** — if the message contains `practice/worksheet/study material` keywords *without* a chapter, run class extraction and serve PDFs, skip brain.
 
 ### Personal Memory
@@ -166,9 +166,11 @@ TTS is generated via `edge-tts` and returned as base64 audio chunks over SSE alo
 | POST | `/quiz/summary` | YouTube → structured summary |
 | POST | `/admin/login` | *(Feature 8)* Verify `ADMIN_TOKEN`, returns `{ok}` or 401 |
 | GET/POST/PUT/DELETE | `/lectures(/...)` | *(Feature 8)* Lecture catalog CRUD — **admin-only** via `X-Admin-Token` header |
-| GET | `/lectures/{class}/{chapter}/practicals` | *(Feature 9)* Public — returns `{curated, class_pdfs}` bundle |
-| POST/PUT/DELETE | `/lectures/{class}/{chapter}/practicals(/...)` | *(Feature 9)* Practical CRUD — **admin-only** |
-| POST | `/practicals/generate` | *(Feature 9)* AI-generate practical tasks from current `pending_youtube` transcript |
+| GET | `/lectures/{class}/{chapter}/practicals` | *(Feature 9)* Public — returns `{practice_tasks, curated, class_pdfs}` bundle |
+| POST | `/lectures/{class}/{chapter}/practice/generate` | *(Feature 9)* **admin** — generate grade-aware practice (preview, not saved) |
+| PUT/DELETE | `/lectures/{class}/{chapter}/practice` | *(Feature 9)* **admin** — save / clear teacher-reviewed practice |
+| POST/PUT/DELETE | `/lectures/{class}/{chapter}/practicals(/...)` | *(Feature 9)* Legacy curated-link CRUD — **admin-only** (not in UI) |
+| POST | `/practicals/generate` | *(Feature 9)* **Deprecated** live student generation — no longer called by the UI |
 
 **Main request body:** `{ message, session_id, imgbase64 (optional), tts (bool) }`
 

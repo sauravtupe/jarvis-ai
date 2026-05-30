@@ -32,10 +32,124 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 # Practical exercises (Feature 9)
 # Practicals live INSIDE lectures.json (no separate file). Only the AI-generated
 # task cache and config constants live here.
-PRACTICAL_AI_PROMPT_VERSION = "2026-05-26a"
+# 2026-05-30a: switched from coding-only generation to age/grade-aware generation.
+PRACTICAL_AI_PROMPT_VERSION = "2026-05-30a"
 PRACTICAL_AI_CACHE_PREFIX = "practicals_ai_cache"  # S3 key prefix
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_PRACTICAL_MODEL = os.getenv("GEMINI_PRACTICAL_MODEL", "gemini-2.5-flash")
+
+# ─── Grade → age-band mapping (Feature 9 age-aware practice) ─────────────────
+# Single source of truth for how generated practice is leveled. Reused by the
+# practice prompt builder AND the server-side validator (defense in depth — the
+# validator strips code from non-coding bands even if the model ignores the
+# prompt). coding_allowed is True only for Grade 6 and above, per product
+# decision: coding tasks appear only when (a) the lesson actually teaches coding
+# AND (b) the class is Middle school or higher.
+GRADE_BANDS = {
+    "early_years": {
+        "label": "Early Years (UKG)",
+        "age_range": "4-5",
+        "coding_allowed": False,
+        "reading_level": "non-reader — instructions are read aloud by a teacher or parent",
+        "tone": "warm, playful, very simple words, one idea at a time",
+        "allowed_activity_types": [
+            "matching", "coloring", "observation", "picture", "speaking", "game", "discussion",
+        ],
+        "guidance": (
+            "Design hands-on, screen-light activities a 4-5 year old can do with a grown-up: "
+            "matching pictures, coloring, naming/identifying objects, simple observation ('find 3 robots "
+            "at home'), speaking/show-and-tell, and gentle introductions to AI ideas ('what is a robot?'). "
+            "No reading-heavy tasks, no worksheets with long text, absolutely no coding."
+        ),
+    },
+    "primary": {
+        "label": "Primary",
+        "age_range": "6-10",
+        "coding_allowed": False,
+        "reading_level": "early reader — short, simple sentences",
+        "tone": "friendly, encouraging, concrete examples",
+        "allowed_activity_types": [
+            "quiz", "matching", "observation", "picture", "project", "worksheet", "discussion", "game",
+        ],
+        "guidance": (
+            "Design age-appropriate activities for 6-10 year olds: simple quizzes, draw-and-label, "
+            "matching, real-world observation, short creative projects, and unplugged 'think like a computer' "
+            "games. No actual coding — explain AI ideas with everyday analogies."
+        ),
+    },
+    "middle": {
+        "label": "Middle School",
+        "age_range": "11-13",
+        "coding_allowed": True,
+        "reading_level": "fluent reader",
+        "tone": "curious, slightly challenging, real-world relevance",
+        "allowed_activity_types": [
+            "logical-thinking", "unplugged", "project", "quiz", "worksheet", "discussion", "coding",
+        ],
+        "guidance": (
+            "Design logical-thinking activities and beginner projects for 11-13 year olds: step-by-step "
+            "reasoning, simple algorithms on paper (unplugged), block-based coding (Scratch) or very "
+            "beginner Python ONLY IF the lesson actually teaches coding. If the lesson is conceptual, "
+            "prefer unplugged/logical activities over code."
+        ),
+    },
+    "secondary": {
+        "label": "Secondary",
+        "age_range": "14-15",
+        "coding_allowed": True,
+        "reading_level": "fluent reader",
+        "tone": "practical, project-oriented",
+        "allowed_activity_types": [
+            "project", "coding", "logical-thinking", "quiz", "worksheet", "discussion",
+        ],
+        "guidance": (
+            "Design practical projects and beginner technical exercises for 14-15 year olds. Coding/ML "
+            "tasks are appropriate WHEN the lesson teaches them; otherwise use applied projects and "
+            "analysis activities."
+        ),
+    },
+    "senior": {
+        "label": "Senior Secondary",
+        "age_range": "16-18",
+        "coding_allowed": True,
+        "reading_level": "advanced reader",
+        "tone": "rigorous, real-world, portfolio-worthy",
+        "allowed_activity_types": [
+            "coding", "project", "machine-learning", "research", "logical-thinking", "discussion",
+        ],
+        "guidance": (
+            "Design advanced practical tasks for 16-18 year olds: real coding, AI/ML mini-projects, "
+            "datasets, model building and evaluation — WHEN the lesson teaches coding. For conceptual "
+            "lessons, use research/analysis projects instead of code."
+        ),
+    },
+}
+
+
+def band_for_class(class_name: str) -> dict:
+    """Return the age-band descriptor for a class_name (UKG / class_1 … class_12).
+
+    Falls back to the 'middle' band (no coding unless taught) for unknown values
+    so generation never crashes on an unexpected class.
+    """
+    if not class_name:
+        return GRADE_BANDS["middle"]
+    cn = str(class_name).strip().lower()
+    if cn in ("ukg", "kindergarten"):
+        return GRADE_BANDS["early_years"]
+    try:
+        n = int(cn.replace("class_", ""))
+    except (ValueError, AttributeError):
+        return GRADE_BANDS["middle"]
+    if 1 <= n <= 5:
+        return GRADE_BANDS["primary"]
+    if 6 <= n <= 8:
+        return GRADE_BANDS["middle"]
+    if 9 <= n <= 10:
+        return GRADE_BANDS["secondary"]
+    if 11 <= n <= 12:
+        return GRADE_BANDS["senior"]
+    return GRADE_BANDS["middle"]
 
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
 

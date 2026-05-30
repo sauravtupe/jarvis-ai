@@ -139,6 +139,8 @@ class PracticalBundle(BaseModel):
     lecture: dict
     curated: List[PracticalRecord]
     class_pdfs: List[PracticeFile]
+    # Teacher-saved, grade-aware AI practice activities (Feature 9 redesign).
+    practice_tasks: List["AIPracticalTask"] = []
 
 
 class AIPracticalRequest(BaseModel):
@@ -147,14 +149,25 @@ class AIPracticalRequest(BaseModel):
     use_cache: bool = True
 
 
+class ResourceLink(BaseModel):
+    label: str
+    url: str
+
+
 class AIPracticalTask(BaseModel):
     title: str
     description: str
-    steps: List[str]
-    platform_suggestion: str
+    # activity_type generalizes beyond coding: matching, coloring, observation,
+    # quiz, discussion, project, game, worksheet, coding, etc.
+    activity_type: str = "project"
+    steps: List[str] = []
+    materials: List[str] = []
+    resources: List[ResourceLink] = []
+    # Coding-only fields — empty for younger / non-coding activities.
+    platform_suggestion: str = ""
     starter_code: str = ""
-    estimated_minutes: int
-    difficulty: str
+    estimated_minutes: int = 30
+    difficulty: str = "beginner"
     learning_outcomes: List[str] = []
 
 
@@ -162,3 +175,18 @@ class AIPracticalResponse(BaseModel):
     video_id: str
     tasks: List[AIPracticalTask]
     cached: bool
+
+
+# Feature 9 redesign — teacher-driven, grade-aware practice
+class PracticeGenerateResult(BaseModel):
+    """Result of an admin 'Generate Practice' call (preview — not yet saved)."""
+    class_name: str
+    chapter: int
+    grade_band: str
+    coding_allowed: bool
+    tasks: List[AIPracticalTask]
+
+
+class PracticeSaveRequest(BaseModel):
+    """Teacher saves the reviewed practice tasks onto a lecture."""
+    tasks: List[AIPracticalTask]

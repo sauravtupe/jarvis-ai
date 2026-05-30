@@ -274,20 +274,95 @@ def delete_practical(class_name: str, chapter: int, practical_id: str) -> None:
     logger.info("[PRACTICAL] Deleted %s / %s practical %s", class_name, chapter_key, practical_id)
 
 
+# ─── Teacher-saved AI practice (Feature 9 redesign) ─────────────────────────
+# The teacher generates grade-aware practice in the Lecture Panel, reviews it,
+# and saves it onto the chapter record as `practice_tasks`. Students then see
+# the saved set. This is separate from `practicals` (legacy manual curated links)
+# which stays readable for back-compat.
+
+def _normalize_practice_task(t: Dict[str, Any]) -> Dict[str, Any]:
+    """Clamp a single AI practice task into a clean, serializable dict."""
+    if not isinstance(t, dict):
+        return {}
+    def _strlist(v, cap):
+        return [str(x).strip() for x in (v or []) if str(x).strip()][:cap] if isinstance(v, list) else []
+    resources = []
+    for r in (t.get("resources") or [])[:6]:
+        if not isinstance(r, dict):
+            continue
+        url = str(r.get("url", "")).strip()
+        if url.startswith("http://") or url.startswith("https://"):
+            resources.append({"label": str(r.get("label", "") or url).strip()[:80], "url": url[:500]})
+    try:
+        minutes = int(t.get("estimated_minutes") or 30)
+    except (TypeError, ValueError):
+        minutes = 30
+    return {
+        "title": str(t.get("title", "")).strip()[:200],
+        "activity_type": str(t.get("activity_type", "project")).strip().lower() or "project",
+        "description": str(t.get("description", "")).strip()[:800],
+        "steps": _strlist(t.get("steps"), 8),
+        "materials": _strlist(t.get("materials"), 8),
+        "resources": resources,
+        "platform_suggestion": str(t.get("platform_suggestion", "")).strip(),
+        "starter_code": str(t.get("starter_code", "")).strip()[:2000],
+        "estimated_minutes": max(5, min(240, minutes)),
+        "difficulty": str(t.get("difficulty", "beginner")).strip().lower(),
+        "learning_outcomes": _strlist(t.get("learning_outcomes"), 5),
+    }
+
+
+def save_practice_tasks(class_name: str, chapter: int, tasks: List[Dict[str, Any]]) -> List[Dict]:
+    """Persist the teacher-reviewed practice tasks onto the chapter record."""
+    _lec._validate_class(class_name)
+    chapter_key = _lec._validate_chapter(chapter)
+    if not isinstance(tasks, list) or not tasks:
+        raise PracticalError("At least one practice task is required to save", 422)
+
+    clean = [_normalize_practice_task(t) for t in tasks]
+    clean = [t for t in clean if t.get("title") and t.get("description")][:6]
+    if not clean:
+        raise PracticalError("No valid practice tasks to save (each needs a title and description)", 422)
+
+    from config import PRACTICAL_AI_PROMPT_VERSION
+    with _lec._lock:
+        catalog = _lec._load_catalog()
+        rec = _ensure_chapter_exists(catalog, class_name, chapter_key)
+        rec["practice_tasks"] = clean
+        rec["practice_generated_at"] = datetime.now(timezone.utc).isoformat()
+        rec["practice_prompt_version"] = PRACTICAL_AI_PROMPT_VERSION
+        rec["practice_class"] = class_name
+        _lec._atomic_write(catalog)
+    logger.info("[PRACTICAL] Saved %d practice tasks for %s / %s", len(clean), class_name, chapter_key)
+    return clean
+
+
+def clear_practice_tasks(class_name: str, chapter: int) -> None:
+    """Remove saved practice tasks from a chapter record."""
+    _lec._validate_class(class_name)
+    chapter_key = _lec._validate_chapter(chapter)
+    with _lec._lock:
+        catalog = _lec._load_catalog()
+        rec = _ensure_chapter_exists(catalog, class_name, chapter_key)
+        for k in ("practice_tasks", "practice_generated_at", "practice_prompt_version", "practice_class"):
+            rec.pop(k, None)
+        _lec._atomic_write(catalog)
+    logger.info("[PRACTICAL] Cleared practice tasks for %s / %s", class_name, chapter_key)
+
+
 # ─── Bundle composer ────────────────────────────────────────────────────────
 
 def build_practical_bundle(class_name: str, chapter: int) -> Dict[str, Any]:
     """Return the public 'practical view' for a chapter.
 
     Combines:
-      - curated   : admin-added practical records from lectures.json
-      - class_pdfs: existing class-wise PDFs (general material)
-      - lecture   : title + video_id of the parent lecture (for header context)
+      - practice_tasks: teacher-saved, grade-aware AI practice activities
+      - curated       : legacy admin-added link records from lectures.json
+      - class_pdfs    : existing class-wise PDFs (general material)
+      - lecture       : title + video_id of the parent lecture (for header context)
 
-    AI-generated tasks are NOT included here — they're fetched from a separate
-    endpoint that takes the session's transcript and returns generated tasks
-    with caching. Keeping them separate lets the frontend show curated
-    practicals immediately while AI tasks load in the background.
+    practice_tasks is the primary student-facing content in the Feature 9
+    redesign — generated by the teacher in the Lecture Panel and saved here.
     """
     _lec._validate_class(class_name)
     chapter_key = _lec._validate_chapter(chapter)
@@ -304,6 +379,7 @@ def build_practical_bundle(class_name: str, chapter: int) -> Dict[str, Any]:
         },
         "curated": [_normalize_practical_record(p) for p in (rec.get("practicals") or []) if isinstance(p, dict)],
         "class_pdfs": list_pdfs_for_class(class_name),
+        "practice_tasks": [_normalize_practice_task(t) for t in (rec.get("practice_tasks") or []) if isinstance(t, dict)],
     }
 
 

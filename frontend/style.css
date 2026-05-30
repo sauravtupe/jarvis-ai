@@ -2787,3 +2787,46 @@ textarea { font-family: var(--font); color: var(--text); }
     text-align: right;
 }
 .practical-pdf-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* ── Feature 9 redesign: age-aware practice ── */
+.practical-activity { background: rgba(168,85,247,0.18); color: #e9d5ff; }
+.practical-materials { font-size: .82rem; color: var(--text-dim); margin-top: 8px; }
+.practical-materials ul { margin: 4px 0 0; padding-left: 22px; line-height: 1.55; }
+.practical-resources { font-size: .82rem; color: var(--text-dim); margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.practical-resource-link {
+    display: inline-block;
+    font-size: .8rem;
+    color: #93c5fd;
+    text-decoration: none;
+    padding: 2px 8px;
+    border: 1px solid rgba(147,197,253,0.3);
+    border-radius: 8px;
+}
+.practical-resource-link:hover { color: #60a5fa; border-color: rgba(147,197,253,0.6); }
+
+/* Per-card remove (admin review) */
+.practical-card { position: relative; }
+.practical-card-remove {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: 6px;
+    background: rgba(239,68,68,0.16);
+    color: #fecaca;
+    font-size: .8rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--transition);
+}
+.practical-card-remove:hover { background: rgba(239,68,68,0.32); }
+
+/* Admin practice generate/review/save toolbar */
+.practice-admin-hint { font-size: .8rem; color: var(--text-dim); line-height: 1.5; margin: 0 0 12px; }
+.practice-admin-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.practice-admin-status { font-size: .82rem; color: var(--text-dim); line-height: 1.5; margin: 0 0 12px; min-height: 1em; }
+.practice-admin-status-ok { color: #bbf7d0; }
+.practice-admin-status-error { color: #fecaca; }
+#practice-admin-cards { display: flex; flex-direction: column; gap: 10px; }

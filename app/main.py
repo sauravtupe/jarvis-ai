@@ -29,6 +29,7 @@ from app.models import (
     AdminLoginRequest, LectureCreate, LectureUpdate, LectureRecord, LectureListResponse,
     PracticalCreate, PracticalRecord, PracticalBundle,
     AIPracticalRequest, AIPracticalResponse, AIPracticalTask,
+    PracticeGenerateResult, PracticeSaveRequest,
 )
 
 RATE_LIMIT_MESSAGE = (
@@ -1301,9 +1302,10 @@ def _practical_error_to_http(exc) -> HTTPException:
 
 @app.get("/lectures/{class_name}/{chapter}/practicals", response_model=PracticalBundle)
 async def get_chapter_practicals(class_name: str, chapter: int):
-    """Public — returns curated practicals + class PDFs for a chapter.
+    """Public — returns teacher-saved practice tasks + legacy curated links + class PDFs.
 
-    AI-generated tasks are fetched separately via POST /practicals/generate.
+    practice_tasks is the primary student-facing content (generated and saved by
+    the teacher in the Lecture Panel). curated is the legacy manual-link set.
     """
     try:
         bundle = practical_service.build_practical_bundle(class_name, chapter)
@@ -1313,6 +1315,7 @@ async def get_chapter_practicals(class_name: str, chapter: int):
             lecture=bundle["lecture"],
             curated=[PracticalRecord(**p) for p in bundle["curated"]],
             class_pdfs=[PracticeFile(**f) for f in bundle["class_pdfs"]],
+            practice_tasks=[AIPracticalTask(**t) for t in bundle.get("practice_tasks", [])],
         )
     except (practical_service.PracticalError, lecture_service.LectureError) as e:
         raise _practical_error_to_http(e)
@@ -1379,6 +1382,125 @@ async def delete_practical_endpoint(
             chapter=chapter,
             practical_id=practical_id,
         )
+        return Response(status_code=204)
+    except (practical_service.PracticalError, lecture_service.LectureError) as e:
+        raise _practical_error_to_http(e)
+
+
+# ─── Teacher-driven grade-aware practice generation (Feature 9 redesign) ─────
+
+@app.post(
+    "/lectures/{class_name}/{chapter}/practice/generate",
+    response_model=PracticeGenerateResult,
+)
+async def admin_generate_practice(
+    class_name: str,
+    chapter: int,
+    _: bool = Depends(require_admin),
+):
+    """Admin: generate grade/age/lesson-aware practice for a saved lecture.
+
+    Returns a PREVIEW (not saved). The teacher reviews, regenerates if needed,
+    then saves via PUT. Fetches the transcript for the lecture's video_id.
+    """
+    from config import (
+        GEMINI_API_KEY, GEMINI_PRACTICAL_MODEL, PRACTICAL_AI_PROMPT_VERSION, band_for_class,
+    )
+    try:
+        lecture_service._validate_class(class_name)
+        chapter_key = lecture_service._validate_chapter(chapter)
+    except lecture_service.LectureError as e:
+        raise _practical_error_to_http(e)
+
+    catalog = lecture_service._load_catalog()
+    rec = catalog.get(class_name, {}).get(chapter_key)
+    if not rec or not rec.get("video_id"):
+        raise HTTPException(
+            status_code=404,
+            detail=f"No lecture (with a video) saved at {class_name} / {chapter_key}. Add the lecture first.",
+        )
+
+    video_id = rec["video_id"]
+    try:
+        transcript = quiz_service.get_transcript(video_id)
+    except Exception as e:
+        logger.warning("[PRACTICAL] Transcript fetch failed for %s: %s", video_id, e)
+        raise HTTPException(
+            status_code=422,
+            detail="Couldn't fetch this lecture's transcript — make sure the video has captions, then retry.",
+        )
+
+    band = band_for_class(class_name)
+    try:
+        tasks = quiz_service.generate_practical_tasks(
+            transcript=transcript,
+            video_id=video_id,
+            groq_api_keys=GROQ_API_KEYS,
+            gemini_api_key=GEMINI_API_KEY,
+            gemini_model=GEMINI_PRACTICAL_MODEL,
+            lecture_title=rec.get("title", ""),
+            class_name=class_name,
+            prompt_version=PRACTICAL_AI_PROMPT_VERSION,
+            use_cache=False,  # teacher wants a fresh draft to review
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error("[PRACTICAL] Admin generation failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Practice generation failed: {e}")
+
+    return PracticeGenerateResult(
+        class_name=class_name,
+        chapter=chapter,
+        grade_band=band["label"],
+        coding_allowed=band["coding_allowed"],
+        tasks=[AIPracticalTask(**t) for t in tasks],
+    )
+
+
+@app.put(
+    "/lectures/{class_name}/{chapter}/practice",
+    response_model=PracticeGenerateResult,
+)
+async def admin_save_practice(
+    class_name: str,
+    chapter: int,
+    request: PracticeSaveRequest,
+    _: bool = Depends(require_admin),
+):
+    """Admin: save the teacher-reviewed practice tasks onto the lecture."""
+    from config import band_for_class
+    try:
+        saved = practical_service.save_practice_tasks(
+            class_name=class_name,
+            chapter=chapter,
+            tasks=[t.model_dump() for t in request.tasks],
+        )
+    except (practical_service.PracticalError, lecture_service.LectureError) as e:
+        raise _practical_error_to_http(e)
+
+    band = band_for_class(class_name)
+    return PracticeGenerateResult(
+        class_name=class_name,
+        chapter=chapter,
+        grade_band=band["label"],
+        coding_allowed=band["coding_allowed"],
+        tasks=[AIPracticalTask(**t) for t in saved],
+    )
+
+
+@app.delete(
+    "/lectures/{class_name}/{chapter}/practice",
+    status_code=204,
+)
+async def admin_clear_practice(
+    class_name: str,
+    chapter: int,
+    _: bool = Depends(require_admin),
+):
+    """Admin: clear saved practice tasks from a lecture."""
+    try:
+        practical_service.clear_practice_tasks(class_name=class_name, chapter=chapter)
         return Response(status_code=204)
     except (practical_service.PracticalError, lecture_service.LectureError) as e:
         raise _practical_error_to_http(e)
