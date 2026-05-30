@@ -49,11 +49,28 @@ function _onJarvisSpeechStart() {
             else if (recognition) recognition.stop();
         } catch (_) {}
     }
+    // Wake-word mode: pause the state machine while Jarvis talks. Visual
+    // feedback (BLOCKED) reflects that the mic isn't open, and _onJarvisSpeechEnd
+    // will return us to PASSIVE after a drain delay.
+    if (typeof settings !== 'undefined' && settings && settings.wakeWord && _micState !== MIC_STATE_OFF) {
+        _clearWakeActiveTimer();
+        _setMicState(MIC_STATE_BLOCKED);
+    }
 }
 
 function _onJarvisSpeechEnd() {
     _jarvisSpeaking = false;
-    maybeRestartListening();
+    if (typeof settings !== 'undefined' && settings && settings.wakeWord && _micState === MIC_STATE_BLOCKED) {
+        // 400 ms drain so the tail of Jarvis's last word doesn't leak into the
+        // mic capture, then return to passive wake-word listening.
+        setTimeout(() => {
+            if (!_jarvisSpeaking && !_videoWatchMode && !isStreaming) {
+                _enterPassiveListening();
+            }
+        }, 400);
+    } else {
+        maybeRestartListening();
+    }
 }
 
 // True while the user is watching a YouTube lecture/video. The video's audio
@@ -96,9 +113,133 @@ function _exitVideoWatchMode() {
         micBtn.title = 'Voice input';
     }
 }
+
+// ─── Wake-word state machine ("Jarvis" hands-free activation) ───────────────
+// PASSIVE  : mic running, only acts on the "Jarvis" wake word
+// ACTIVE   : wake word heard, command capture window open (10s)
+// BLOCKED  : Jarvis is speaking / video is playing / response streaming
+// OFF      : wake word disabled or mic permission not yet granted
+const MIC_STATE_OFF = 'off';
+const MIC_STATE_PASSIVE = 'passive';
+const MIC_STATE_ACTIVE = 'active';
+const MIC_STATE_BLOCKED = 'blocked';
+let _micState = MIC_STATE_OFF;
+let _wakeActiveTimer = null;
+const WAKE_ACTIVE_WINDOW_MS = 10000;
+// Substring matcher for the wake word. Includes common SpeechRecognition
+// misreads ("javis", "jarwis", "service") so the user doesn't have to enunciate.
+const _WAKE_WORD_RE = /\b(jarvis|javis|jarwis|service)\b/i;
+
+function _matchWakeWord(text) {
+    if (!text) return null;
+    const m = _WAKE_WORD_RE.exec(text);
+    if (!m) return null;
+    const after = text.slice(m.index + m[0].length).trim().replace(/^[,.!?\s]+/, '');
+    return { matched: m[0], remaining: after };
+}
+
+function _setMicState(newState) {
+    if (_micState === newState) return;
+    _micState = newState;
+    if (!micBtn) return;
+    micBtn.classList.remove('wake-word-mode', 'wake-active', 'listening', 'auto-listen');
+    if (newState === MIC_STATE_PASSIVE) {
+        micBtn.classList.add('wake-word-mode');
+        micBtn.title = 'Wake word active — say "Jarvis" to talk';
+    } else if (newState === MIC_STATE_ACTIVE) {
+        micBtn.classList.add('wake-active', 'listening');
+        micBtn.title = 'Listening, Sir — go ahead';
+    } else if (newState === MIC_STATE_BLOCKED) {
+        micBtn.title = _jarvisSpeaking ? 'Jarvis speaking…' : 'Mic paused';
+    } else {
+        micBtn.title = settings.wakeWord
+            ? 'Click mic to enable wake word ("Jarvis")'
+            : 'Voice input — click to start';
+    }
+}
+
+function _clearWakeActiveTimer() {
+    if (_wakeActiveTimer) {
+        clearTimeout(_wakeActiveTimer);
+        _wakeActiveTimer = null;
+    }
+}
+
+function _startActiveWindow() {
+    _setMicState(MIC_STATE_ACTIVE);
+    _clearWakeActiveTimer();
+    _wakeActiveTimer = setTimeout(() => {
+        _wakeActiveTimer = null;
+        if (_micState === MIC_STATE_ACTIVE) {
+            if (speechWidget) speechWidget.classList.remove('visible');
+            if (speechWidgetText) speechWidgetText.textContent = '';
+            if (typeof showToast === 'function') {
+                showToast('No command heard, returning to wake-word mode.', 3000);
+            }
+            _enterPassiveListening();
+        }
+    }, WAKE_ACTIVE_WINDOW_MS);
+}
+
+function _resetActiveWindow() {
+    if (_micState !== MIC_STATE_ACTIVE) return;
+    _clearWakeActiveTimer();
+    _wakeActiveTimer = setTimeout(() => {
+        _wakeActiveTimer = null;
+        if (_micState === MIC_STATE_ACTIVE) _enterPassiveListening();
+    }, WAKE_ACTIVE_WINDOW_MS);
+}
+
+function _enterPassiveListening() {
+    _clearWakeActiveTimer();
+    if (!settings || !settings.wakeWord) {
+        _setMicState(MIC_STATE_OFF);
+        autoListenMode = false;
+        if (isListening) stopListening();
+        return;
+    }
+    if (_jarvisSpeaking || _videoWatchMode || isStreaming) {
+        _setMicState(MIC_STATE_BLOCKED);
+        return;
+    }
+    _setMicState(MIC_STATE_PASSIVE);
+    autoListenMode = true;
+    if (!isListening) startListening();
+}
+
+function _enterActiveListening() {
+    if (_jarvisSpeaking || _videoWatchMode) {
+        _setMicState(MIC_STATE_BLOCKED);
+        return;
+    }
+    autoListenMode = true;
+    if (!isListening) startListening();
+    _startActiveWindow();
+}
+
+function _disableMic() {
+    _clearWakeActiveTimer();
+    _setMicState(MIC_STATE_OFF);
+    autoListenMode = false;
+    if (isListening) stopListening();
+}
+
+// Called once at end of init(). The mic needs a user gesture to start, so we
+// don't actually open it here — the first mic click does that. This just
+// configures the button label to invite that first click.
+function _maybeStartWakeWord() {
+    if (!recognition) return;
+    if (!settings || !settings.wakeWord) {
+        if (micBtn) micBtn.title = 'Voice input — click to start';
+        return;
+    }
+    _setMicState(MIC_STATE_OFF);
+    if (micBtn) micBtn.title = 'Click mic once to enable wake word ("Jarvis")';
+}
+
 let _ttsAudio = null;   // dedicated pre-unlocked element for inline TTS playback
 const SETTINGS_KEY = 'jarvis_settings';
-const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true };
+const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true, wakeWord: true };
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
 let PRE_STARTER_CACHE = {};
 let settings = { ...DEFAULT_SETTINGS };
@@ -145,6 +286,7 @@ const toggleAutoActivity  = $('toggle-auto-activity');
 const toggleAutoSearch    = $('toggle-auto-search');
 const toggleThinkingSounds = $('toggle-thinking-sounds');
 const toggleVoiceInterrupt = $('toggle-voice-interrupt');
+const toggleWakeWord       = $('toggle-wake-word');
 const toastContainer     = $('toast-container');
 const uploadBtn          = $('upload-btn');
 const uploadInput        = $('upload-input');
@@ -690,6 +832,7 @@ function loadSettings() {
         if (toggleAutoSearch) toggleAutoSearch.checked = settings.autoOpenSearchResults;
         if (toggleThinkingSounds) toggleThinkingSounds.checked = settings.thinkingSounds;
         if (toggleVoiceInterrupt) toggleVoiceInterrupt.checked = settings.voiceInterrupt;
+        if (toggleWakeWord) toggleWakeWord.checked = settings.wakeWord;
     } catch (_) {}
 }
 
@@ -763,6 +906,39 @@ function initSpeech() {
             if (alt.length > transcript.length) transcript = alt;
         }
         const isFinal = last && last.isFinal;
+
+        // === Wake-word PASSIVE mode ===
+        // Only act on results that contain "Jarvis". Everything else is silent
+        // background — the speech widget stays empty so it doesn't feel "always on".
+        if (_micState === MIC_STATE_PASSIVE) {
+            const wake = _matchWakeWord(transcript);
+            if (!wake) {
+                if (speechWidgetText) speechWidgetText.textContent = '';
+                return;
+            }
+            if (speechWidget) speechWidget.classList.add('visible');
+            if (wake.remaining && wake.remaining.length >= 2) {
+                // Wake word + command in the same utterance: "Jarvis, what's the weather?"
+                if (speechWidgetText) speechWidgetText.textContent = wake.remaining;
+                if (isFinal) {
+                    _clearWakeActiveTimer();
+                    pendingSendTranscript = null;
+                    clearTimeout(speechSendTimeout);
+                    speechSendTimeout = null;
+                    sendMessage(wake.remaining);
+                } else {
+                    // Interim — open the active window so the user has time to finish
+                    if (_micState !== MIC_STATE_ACTIVE) _startActiveWindow();
+                }
+            } else {
+                // Bare wake word — open the 10s command window
+                if (speechWidgetText) speechWidgetText.textContent = 'Listening, Sir…';
+                _startActiveWindow();
+            }
+            return;
+        }
+
+        // === Active command capture (manual mic, or after wake-word fired) ===
         if (speechWidgetText) speechWidgetText.textContent = transcript;
         if (speechWidget) speechWidget.classList.add('visible');
         if (settings.voiceInterrupt && ttsPlayer && ttsPlayer.playing && transcript.length > 0) {
@@ -778,22 +954,35 @@ function initSpeech() {
                 speechSendTimeout = null;
                 if (speechWidget) speechWidget.classList.remove('visible');
                 if (speechWidgetText) speechWidgetText.textContent = '';
-                stopListening();
+                if (settings.wakeWord) _enterPassiveListening();
+                else stopListening();
                 return;
             }
             // Ignore noise/very-short transcripts (ambient sound, breath, etc.)
             if (transcript.length < 2) return;
-            pendingSendTranscript = transcript;
+            // If the user said "Jarvis ..." in active mode, strip the prefix
+            let cmd = transcript;
+            const wakeStrip = _matchWakeWord(cmd);
+            if (wakeStrip && wakeStrip.remaining && wakeStrip.remaining.length >= 2) {
+                cmd = wakeStrip.remaining;
+            }
+            pendingSendTranscript = cmd;
             clearTimeout(speechSendTimeout);
             speechSendTimeout = setTimeout(() => {
                 if (pendingSendTranscript) {
+                    _clearWakeActiveTimer();
                     sendMessage(pendingSendTranscript);
                     pendingSendTranscript = null;
                 }
                 speechSendTimeout = null;
-                stopListening();
+                // In wake-word mode, the BLOCKED→PASSIVE transition happens via
+                // _onJarvisSpeechEnd or maybeRestartListening. Without wake word,
+                // stop the mic the way the legacy click-toggle expects.
+                if (!settings.wakeWord) stopListening();
             }, SPEECH_SEND_DELAY_MS);
         } else if (!isFinal) {
+            // Interim activity in ACTIVE — extend the 10s window
+            _resetActiveWindow();
             pendingSendTranscript = null;
             clearTimeout(speechSendTimeout);
             speechSendTimeout = null;
@@ -902,7 +1091,14 @@ function maybeRestartListening() {
     if (!autoListenMode) return;
     setTimeout(() => {
         if (autoListenMode && !isStreaming && !isListening && recognition && !_jarvisSpeaking && !_videoWatchMode) {
-            startListening();
+            // Wake-word mode: never auto-restart into ACTIVE. The 10s command
+            // window only opens after we hear "Jarvis" again. Returning here
+            // means the previous response finished or the user cancelled.
+            if (settings && settings.wakeWord && _micState !== MIC_STATE_ACTIVE) {
+                _enterPassiveListening();
+            } else {
+                startListening();
+            }
         }
     }, SPEECH_RESTART_DELAY_MS);
 }
@@ -1463,39 +1659,41 @@ function bindEvents() {
         // Manual override: if mic is paused because a video is being watched,
         // a click is an explicit "I'm ready to talk now" signal — exit watch mode.
         if (_videoWatchMode) {
-            _autoListenBeforeVideo = true; // ensure exit restarts mic
+            _autoListenBeforeVideo = true;
             _exitVideoWatchMode();
             return;
         }
-        if (isListening) {
-            autoListenMode = false;
-            stopListening();
-            if (micBtn) micBtn.classList.remove('auto-listen');
-            return;
-        }
-        autoListenMode = true;
         speechErrorRetryCount = 0;
-        if (micBtn) {
-            micBtn.classList.add('auto-listen');
-            micBtn.title = 'Voice input — click to stop auto-listen';
-        }
-        // If Jarvis is currently speaking when the user clicks the mic, treat it
-        // as an "interrupt me, I want to talk" signal: stop Jarvis's audio,
-        // briefly wait for the speaker's audio buffer to drain (otherwise the
-        // tail of his last word leaks into the mic), then open the mic.
+
+        // Interrupt Jarvis if he's currently speaking: stop the audio, wait for
+        // the speaker buffer to drain, then open the mic in ACTIVE mode.
         const ttsActive = _jarvisSpeaking ||
             (ttsPlayer && (ttsPlayer.playing || ttsPlayer.queue.length > 0));
         if (ttsActive) {
             if (ttsPlayer) { ttsPlayer.stop(); ttsPlayer.stopped = false; }
             try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (_) {}
-            // 400ms is long enough for the audio device to drain its buffer on
-            // both Chrome and Safari; short enough that the user doesn't notice
-            // a stall before the mic activates.
             setTimeout(() => {
-                if (autoListenMode && !isListening) startListening();
+                if (!_jarvisSpeaking) _enterActiveListening();
             }, 400);
+            return;
+        }
+
+        // State-based click behaviour
+        if (_micState === MIC_STATE_ACTIVE) {
+            // Cancel the current command window
+            if (settings.wakeWord) _enterPassiveListening();
+            else _disableMic();
+        } else if (_micState === MIC_STATE_PASSIVE) {
+            // Skip wake-word check — user wants to talk right now
+            _enterActiveListening();
         } else {
-            startListening();
+            // OFF or BLOCKED → start listening
+            if (settings.wakeWord) {
+                _enterPassiveListening();
+                showToast('Wake word active. Say "Jarvis" anytime to talk.', 4500);
+            } else {
+                _enterActiveListening();
+            }
         }
     });
     if (ttsBtn) ttsBtn.addEventListener('click', () => {
@@ -1558,6 +1756,28 @@ function bindEvents() {
         toggleVoiceInterrupt.addEventListener('change', () => {
             settings.voiceInterrupt = toggleVoiceInterrupt.checked;
             saveSettings();
+        });
+    }
+    if (toggleWakeWord) {
+        toggleWakeWord.addEventListener('change', () => {
+            settings.wakeWord = toggleWakeWord.checked;
+            saveSettings();
+            // Apply immediately. If turning on, drop into PASSIVE listening when
+            // possible (mic permission must already be granted from a prior
+            // click — otherwise the title prompts the user to click).
+            if (settings.wakeWord) {
+                if (_jarvisSpeaking || _videoWatchMode || isStreaming) {
+                    _setMicState(MIC_STATE_BLOCKED);
+                } else if (recognition) {
+                    _enterPassiveListening();
+                    showToast('Wake word enabled. Say "Jarvis" to talk.', 4000);
+                } else {
+                    showToast('Wake word enabled. Speech recognition is not available in this browser.', 5000);
+                }
+            } else {
+                _disableMic();
+                showToast('Wake word disabled. Click the mic to talk.', 3500);
+            }
         });
     }
 }
