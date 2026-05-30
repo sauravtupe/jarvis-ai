@@ -66,6 +66,7 @@ from config import (
     ASSISTANT_NAME, TTS_VOICE, TTS_RATE, MAX_UPLOAD_SIZE_MB,
     CHATS_DATA_DIR, OPENAI_API_KEY, GROQ_VISION_MODEL,
     SUPABASE_URL, SUPABASE_ANON_KEY,
+    VECTOR_STORE_ENABLED,
 )
 
 
@@ -180,11 +181,20 @@ async def lifespan(app: FastAPI):
         logger.info("[STORAGE] Restoring data from S3 (if any)...")
         startup_restore_from_s3()
 
-        logger.info("Initializing vector store service...")
-        t0 = time.perf_counter()
-        vector_store_service = VectorStoreService()
-        vector_store_service.create_vector_store()
-        logger.info("[TIMING] startup_vector_store: %.3fs", time.perf_counter() - t0)
+        if VECTOR_STORE_ENABLED:
+            logger.info("Initializing vector store service...")
+            t0 = time.perf_counter()
+            vector_store_service = VectorStoreService()
+            vector_store_service.create_vector_store()
+            logger.info("[TIMING] startup_vector_store: %.3fs", time.perf_counter() - t0)
+        else:
+            # Vector store is currently a single global FAISS index shared across
+            # all users — it leaks personal memory between accounts. Keep it off
+            # until per-user isolation lands. Skipping init entirely saves the
+            # ~5-10s HuggingFace embeddings load too.
+            vector_store_service = None
+            logger.info("[CONFIG] Vector store DISABLED — personal-memory retrieval is OFF "
+                        "(set VECTOR_STORE_ENABLED=1 to re-enable once per-user isolation is built)")
         logger.info("Initializing Groq service (general queries)...")
         groq_service = GroqService(vector_store_service)
         logger.info("Groq service initialized successfully")
@@ -219,7 +229,7 @@ async def lifespan(app: FastAPI):
         logger.info("Chat service initialized successfully")
         logger.info("=" * 60)
         logger.info("Service Status:")
-        logger.info("  - Vector Store: Ready")
+        logger.info("  - Vector Store: %s", "Ready" if vector_store_service else "Disabled (per VECTOR_STORE_ENABLED)")
         logger.info("  - Groq AI (General): Ready")
         logger.info("  - Groq AI (Realtime): Ready")
         logger.info("  - Brain (Unified Decision): Ready")
@@ -285,11 +295,15 @@ async def lifespan(app: FastAPI):
             for session_id in list(chat_service.sessions.keys()):
                 chat_service.save_chat_session(session_id, sync_cloud=True)
 
-        for _fname in ["index.faiss", "index.pkl"]:
-            _local = VECTOR_STORE_DIR / _fname
-            if _local.exists():
-                upload_bytes_to_s3(_local.read_bytes(), f"vector_store/{_fname}")
-                logger.info("[SHUTDOWN] FAISS %s → S3", _fname)
+        # Only sync FAISS index back to S3 if the vector store was actually
+        # enabled this session — otherwise we'd be re-uploading stale files
+        # from a previous run.
+        if VECTOR_STORE_ENABLED and vector_store_service is not None:
+            for _fname in ["index.faiss", "index.pkl"]:
+                _local = VECTOR_STORE_DIR / _fname
+                if _local.exists():
+                    upload_bytes_to_s3(_local.read_bytes(), f"vector_store/{_fname}")
+                    logger.info("[SHUTDOWN] FAISS %s → S3", _fname)
 
         logger.info("All sessions saved. Goodbye!")
 

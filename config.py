@@ -95,6 +95,14 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 MAX_CHAT_HISTORY_TURNS = 10
+
+# Vector store / FAISS personal-memory retrieval.
+# DISABLED BY DEFAULT (2026-05): the index is a single global store shared
+# across all users, so one user's chat history leaks into another user's LLM
+# context. Will be re-enabled once per-user isolation lands (Feature 7 — auth
+# with per-user vector stores). To force enable: set VECTOR_STORE_ENABLED=1
+# in .env or HF Space Secrets.
+VECTOR_STORE_ENABLED = os.getenv("VECTOR_STORE_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 MAX_MESSAGE_LENGTH = 32_000
 ASSISTANT_NAME = (os.getenv("ASSISTANT_NAME", "").strip() or "Jarvis")
 JARVIS_USER_TITLE = os.getenv("JARVIS_USER_TITLE", "").strip()

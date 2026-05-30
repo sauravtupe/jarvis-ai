@@ -138,15 +138,23 @@ def _startup_restore_from_s3_inner() -> None:
     logger.info("[STORAGE] Checking S3 for data to restore...")
     restored = 0
 
-    # 1. FAISS vector index
-    for fname in ["index.faiss", "index.pkl"]:
-        local = VECTOR_STORE_DIR / fname
-        if not local.exists():
-            data = download_from_s3(f"vector_store/{fname}")
-            if data:
-                local.write_bytes(data)
-                logger.info("[STORAGE] Restored vector_store/%s from S3 (%d bytes)", fname, len(data))
-                restored += 1
+    # 1. FAISS vector index — only pulled when the vector store feature is enabled.
+    # When disabled, downloading it would waste bandwidth on a file we won't load.
+    try:
+        from config import VECTOR_STORE_ENABLED as _VSE
+    except Exception:
+        _VSE = False
+    if _VSE:
+        for fname in ["index.faiss", "index.pkl"]:
+            local = VECTOR_STORE_DIR / fname
+            if not local.exists():
+                data = download_from_s3(f"vector_store/{fname}")
+                if data:
+                    local.write_bytes(data)
+                    logger.info("[STORAGE] Restored vector_store/%s from S3 (%d bytes)", fname, len(data))
+                    restored += 1
+    else:
+        logger.info("[STORAGE] Vector store disabled — skipping FAISS restore from S3")
 
     # 2. Upload records
     local = UPLOAD_DIR / "records.json"

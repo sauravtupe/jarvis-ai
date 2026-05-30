@@ -249,27 +249,33 @@ class GroqService:
 
         context = ""
         context_sources = []
-        t0 = time.perf_counter()
 
-        try:
-            retriever = self.vector_store_service.get_retriever(k=5)
+        # Vector store retrieval is gated — when disabled, the LLM gets no personal-memory
+        # context injected. Currently disabled by default because the FAISS index is one
+        # global store shared across all users (re-enable once per-user isolation ships).
+        if self.vector_store_service is None:
+            logger.debug("[CONTEXT] Vector store disabled — skipping retrieval")
+        else:
+            t0 = time.perf_counter()
+            try:
+                retriever = self.vector_store_service.get_retriever(k=5)
 
-            context_docs = retriever.invoke(question)
+                context_docs = retriever.invoke(question)
 
-            if context_docs:
-                context = "\n".join([doc.page_content for doc in context_docs])
+                if context_docs:
+                    context = "\n".join([doc.page_content for doc in context_docs])
 
-                context_sources = [doc.metadata.get("source", "unknown") for doc in context_docs]
-                logger.info("[CONTEXT] Retrieved %d chunks from sources: %s", len(context_docs), context_sources)
+                    context_sources = [doc.metadata.get("source", "unknown") for doc in context_docs]
+                    logger.info("[CONTEXT] Retrieved %d chunks from sources: %s", len(context_docs), context_sources)
 
-            else:
-                logger.info("[CONTEXT] No relevant chunks found for query")
+                else:
+                    logger.info("[CONTEXT] No relevant chunks found for query")
 
-        except Exception as retrieval_err:
-            logger.warning("Vector store retrieval failed, using empty context: %s", retrieval_err)
+            except Exception as retrieval_err:
+                logger.warning("Vector store retrieval failed, using empty context: %s", retrieval_err)
 
-        finally:
-            _log_timing("vector_db", time.perf_counter() - t0)
+            finally:
+                _log_timing("vector_db", time.perf_counter() - t0)
 
         time_info = get_time_information()
         system_message = JARVIS_SYSTEM_PROMPT
