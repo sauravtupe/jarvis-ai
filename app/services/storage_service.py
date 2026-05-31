@@ -175,31 +175,66 @@ def _hf_delete(key: str) -> bool:
         return False
 
 
-def storage_backend() -> Optional[str]:
-    """Return the active durable backend: 's3', 'hf', or None (local-only)."""
-    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
-        return "s3"
-    if _hf_enabled():
+def _aws_enabled() -> bool:
+    return bool(AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)
+
+
+# ─── Backend routing ─────────────────────────────────────────────────────────
+# Two durable stores can be active at once. We route by key prefix so each kind
+# of data lands where it belongs:
+#
+#   • camera/    → ephemeral image scratch (auto-deleted after 2h). Prefer AWS S3,
+#                  a plain object store, so captures never bloat the HF Dataset's
+#                  git commit history.
+#   • everything → long-lived app data (lectures, practice, notes, chats, quizzes,
+#     else         uploads, vector index). Prefer the FREE HuggingFace Dataset.
+#
+# If only one backend is configured it handles everything. If neither is set,
+# storage is local-only and is wiped on every HF Space rebuild.
+
+def _backend_for_key(key: str) -> Optional[str]:
+    """Pick the durable backend ('s3' | 'hf' | None) that owns a key/prefix."""
+    aws, hf = _aws_enabled(), _hf_enabled()
+    if key.startswith("camera/"):
+        # Ephemeral images: AWS first (no git bloat), then HF, then local.
+        if aws:
+            return "s3"
+        if hf:
+            return "hf"
+        return None
+    # Durable app data: free HF first, then AWS, then local.
+    if hf:
         return "hf"
+    if aws:
+        return "s3"
     return None
 
 
-def upload_bytes_to_s3(data: bytes, key: str, content_type: str = "application/octet-stream") -> Optional[str]:
-    """Upload bytes to S3. Returns public URL or None on failure/missing credentials."""
+def storage_backend() -> Optional[str]:
+    """Active backend for long-lived app data ('s3' | 'hf' | None)."""
+    return _backend_for_key("lectures/lectures.json")
+
+
+def storage_status() -> dict:
+    """Snapshot of where each data class is persisted (surfaced by /health)."""
+    app_data = _backend_for_key("lectures/lectures.json")
+    return {
+        "durable": app_data is not None,
+        "app_data": app_data,            # lectures / practice / notes / chats / quizzes
+        "camera": _backend_for_key("camera/"),  # ephemeral captures (auto-deleted after 2h)
+        "aws_s3": _aws_enabled(),
+        "hf_dataset": _hf_enabled(),
+    }
+
+
+# ─── S3 primitives ───────────────────────────────────────────────────────────
+
+def _s3_upload_bytes(data: bytes, key: str, content_type: str) -> Optional[str]:
     client = _get_s3_client()
     if not client:
-        # No AWS — fall back to the free HuggingFace Dataset backend if configured.
-        if _hf_enabled():
-            return _hf_upload_bytes(data, key)
-        logger.warning("[STORAGE] No durable backend configured (set AWS_* or HF_TOKEN+HF_DATA_REPO) — skipping upload for %s", key)
         return None
     try:
-        client.put_object(
-            Bucket=AWS_S3_BUCKET,
-            Key=key,
-            Body=data,
-            ContentType=content_type,
-        )
+        client.put_object(Bucket=AWS_S3_BUCKET, Key=key, Body=data, ContentType=content_type)
         url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key}"
         logger.info("[STORAGE] S3 upload OK: %s", key)
         return url
@@ -208,12 +243,9 @@ def upload_bytes_to_s3(data: bytes, key: str, content_type: str = "application/o
         return None
 
 
-def download_from_s3(key: str) -> Optional[bytes]:
-    """Download object bytes from S3. Returns None if not found or S3 not configured."""
+def _s3_download(key: str) -> Optional[bytes]:
     client = _get_s3_client()
     if not client:
-        if _hf_enabled():
-            return _hf_download(key)
         return None
     try:
         response = client.get_object(Bucket=AWS_S3_BUCKET, Key=key)
@@ -229,12 +261,9 @@ def download_from_s3(key: str) -> Optional[bytes]:
         return None
 
 
-def delete_s3_object(key: str) -> bool:
-    """Delete a single S3 object. Returns True on success."""
+def _s3_delete(key: str) -> bool:
     client = _get_s3_client()
     if not client:
-        if _hf_enabled():
-            return _hf_delete(key)
         return False
     try:
         client.delete_object(Bucket=AWS_S3_BUCKET, Key=key)
@@ -245,12 +274,24 @@ def delete_s3_object(key: str) -> bool:
         return False
 
 
-def list_s3_objects_older_than(prefix: str, hours: int) -> list:
-    """Return object keys under prefix older than `hours` (S3 or HF dataset)."""
+def _s3_list(prefix: str) -> list:
     client = _get_s3_client()
     if not client:
-        if _hf_enabled():
-            return _hf_list_older_than(prefix, hours)
+        return []
+    keys = []
+    try:
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=AWS_S3_BUCKET, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                keys.append(obj["Key"])
+    except (BotoCoreError, ClientError) as e:
+        logger.error("[STORAGE] S3 list failed for prefix %s: %s", prefix, e)
+    return keys
+
+
+def _s3_list_older_than(prefix: str, hours: int) -> list:
+    client = _get_s3_client()
+    if not client:
         return []
     cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
     keys = []
@@ -265,22 +306,59 @@ def list_s3_objects_older_than(prefix: str, hours: int) -> list:
     return keys
 
 
+# ─── Public API (each call routes to the backend that owns the key) ──────────
+# Names keep the historical "s3" wording so existing call sites are untouched;
+# the actual target is chosen by _backend_for_key().
+
+def upload_bytes_to_s3(data: bytes, key: str, content_type: str = "application/octet-stream") -> Optional[str]:
+    """Persist bytes to the durable store chosen for `key`. Returns URL or None."""
+    backend = _backend_for_key(key)
+    if backend == "s3":
+        return _s3_upload_bytes(data, key, content_type)
+    if backend == "hf":
+        return _hf_upload_bytes(data, key)
+    logger.warning("[STORAGE] No durable backend for %s (set AWS_* or HF_TOKEN+HF_DATA_REPO) — not persisted", key)
+    return None
+
+
+def download_from_s3(key: str) -> Optional[bytes]:
+    """Fetch bytes for `key` from its durable store. None if missing/unconfigured."""
+    backend = _backend_for_key(key)
+    if backend == "s3":
+        return _s3_download(key)
+    if backend == "hf":
+        return _hf_download(key)
+    return None
+
+
+def delete_s3_object(key: str) -> bool:
+    """Delete `key` from its durable store. True on success."""
+    backend = _backend_for_key(key)
+    if backend == "s3":
+        return _s3_delete(key)
+    if backend == "hf":
+        return _hf_delete(key)
+    return False
+
+
+def list_s3_objects_older_than(prefix: str, hours: int) -> list:
+    """Keys under `prefix` older than `hours`, from the backend that owns the prefix."""
+    backend = _backend_for_key(prefix)
+    if backend == "s3":
+        return _s3_list_older_than(prefix, hours)
+    if backend == "hf":
+        return _hf_list_older_than(prefix, hours)
+    return []
+
+
 def list_s3_prefix(prefix: str) -> list:
-    """Return all object keys under a given prefix (S3 or HF dataset)."""
-    client = _get_s3_client()
-    if not client:
-        if _hf_enabled():
-            return _hf_list(prefix)
-        return []
-    keys = []
-    try:
-        paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=AWS_S3_BUCKET, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                keys.append(obj["Key"])
-    except (BotoCoreError, ClientError) as e:
-        logger.error("[STORAGE] S3 list failed for prefix %s: %s", prefix, e)
-    return keys
+    """All keys under `prefix`, from the backend that owns the prefix."""
+    backend = _backend_for_key(prefix)
+    if backend == "s3":
+        return _s3_list(prefix)
+    if backend == "hf":
+        return _hf_list(prefix)
+    return []
 
 
 def startup_restore_from_s3() -> None:

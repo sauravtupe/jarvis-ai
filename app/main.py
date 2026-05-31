@@ -59,6 +59,7 @@ from app.middleware.auth import get_optional_user
 from app.services.storage_service import (
     upload_bytes_to_s3, startup_restore_from_s3,
     list_s3_objects_older_than, delete_s3_object,
+    storage_status,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -123,8 +124,8 @@ def _clean_old_s3_captures():
     """APScheduler job: delete camera captures older than 2 hours (S3 or HF dataset).
 
     Camera images are kept only briefly for reference — the vision model analyses
-    them inline via base64, so they are never needed long-term. Runs every hour,
-    so a capture is purged within ~2-3 hours of being taken.
+    them inline via base64, so they are never needed long-term. Runs every 30
+    minutes, so a capture is purged within ~2.5 hours of being taken.
     """
     keys = list_s3_objects_older_than(prefix="camera/", hours=2)
     if not keys:
@@ -185,8 +186,21 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("[AUDIO] Starter audio files present — skipping generation")
 
-        logger.info("[STORAGE] Restoring data from S3 (if any)...")
+        logger.info("[STORAGE] Restoring data from durable store (if any)...")
         startup_restore_from_s3()
+
+        # Loud, unmissable persistence banner — so it's obvious in the Space logs
+        # whether lecture-panel data will actually survive the next rebuild.
+        _store = storage_status()
+        if _store["durable"]:
+            logger.info("[STORAGE] ✅ Durable storage ACTIVE — app data → %s | camera → %s (auto-deleted after 2h)",
+                        (_store["app_data"] or "—").upper(), (_store["camera"] or "LOCAL").upper())
+        else:
+            logger.warning("=" * 60)
+            logger.warning("[STORAGE] ⚠️  NO DURABLE STORAGE CONFIGURED")
+            logger.warning("[STORAGE] Lectures, practice, notes & chats WILL BE LOST on the next restart/rebuild.")
+            logger.warning("[STORAGE] Fix: set HF_TOKEN + HF_DATA_REPO (free) — or AWS_* — as Space secrets, then restart.")
+            logger.warning("=" * 60)
 
         if VECTOR_STORE_ENABLED:
             logger.info("Initializing vector store service...")
@@ -381,6 +395,7 @@ async def health():
     try:
         return {
             "status": "healthy",
+            "storage": storage_status(),
             "vector_store": vector_store_service is not None,
             "groq_service": groq_service is not None,
             "realtime_service": realtime_service is not None,
