@@ -32,7 +32,7 @@ Use `user_id = 'test-user-001'` as placeholder everywhere user data is saved. Wh
 | Classroom AI | Not built |
 | Lecture Catalog + Admin Panel | Working (Class → Chapter, S3-backed, bilingual voice commands) |
 | Practice (age/grade/lesson-aware, teacher-generated) | Working (UKG→Grade 12 age bands, coding gate Grade 6+ only if taught) |
-| Practice sheet PDF download (jsPDF) | Working (student + admin; clean white printable sheet) |
+| Practice sheet PDF download (browser print → Save as PDF) | Working (student + admin; clean white printable sheet; renders Hindi/Devanagari correctly) |
 | Notes / PPT per lecture (link retrieval) | Working (admin sets URL on lecture; "give me class N chapter M notes" → opens in new tab) |
 | 3D UI + Avatar | Not built |
 
