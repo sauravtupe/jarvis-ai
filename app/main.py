@@ -1449,11 +1449,17 @@ async def admin_generate_practice(
     video_id = rec["video_id"]
     try:
         transcript = quiz_service.get_transcript(video_id)
+    except ValueError as e:
+        # get_transcript raises curated, actionable messages (e.g. Supadata quota exhausted).
+        # Surface the real reason instead of always blaming missing captions.
+        logger.warning("[PRACTICAL] Transcript fetch failed for %s: %s", video_id, e)
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.warning("[PRACTICAL] Transcript fetch failed for %s: %s", video_id, e)
         raise HTTPException(
             status_code=422,
-            detail="Couldn't fetch this lecture's transcript — make sure the video has captions, then retry.",
+            detail="Couldn't fetch this lecture's transcript — the video may have no captions, "
+                   "or the transcript service is temporarily unavailable. Please try again later.",
         )
 
     band = band_for_class(class_name)

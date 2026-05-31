@@ -176,8 +176,27 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # AssemblyAI (YouTube transcription fallback — works locally)
 ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY", "")
 
-# Supadata (YouTube transcript API — works from any IP including HuggingFace cloud)
-SUPADATA_API_KEY = os.getenv("SUPADATA_API_KEY", "")
+# Supadata (YouTube transcript API — works from any IP including HuggingFace cloud).
+# This is the ONLY transcript tier that works on a cloud host: YouTube blocks datacenter
+# IPs, so youtube-transcript-api / yt-dlp (the free local tiers) fail on the HF Space.
+# Free Supadata keys have a monthly quota; add SUPADATA_API_KEY_2, _3, ... and the app
+# rotates to the next key when one returns 429 "limit-exceeded" (same idea as GROQ keys).
+def _load_supadata_api_keys() -> list:
+    keys = []
+    first = os.getenv("SUPADATA_API_KEY", "").strip()
+    if first:
+        keys.append(first)
+    i = 2
+    while True:
+        k = os.getenv(f"SUPADATA_API_KEY_{i}", "").strip()
+        if not k:
+            break
+        keys.append(k)
+        i += 1
+    return keys
+
+SUPADATA_API_KEYS = _load_supadata_api_keys()
+SUPADATA_API_KEY = SUPADATA_API_KEYS[0] if SUPADATA_API_KEYS else ""  # back-compat
 
 # Supabase (Feature 7 — Google Auth)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")

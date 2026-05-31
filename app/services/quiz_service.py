@@ -165,9 +165,15 @@ def _try_subtitle_download(video_id: str) -> Optional[str]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class SupadataQuotaError(Exception):
+    """Raised when a Supadata key is rejected for plan/usage limits (HTTP 429).
+    Signals get_transcript to rotate to the next key rather than give up."""
+
+
 def _try_supadata(video_id: str, api_key: str) -> Optional[str]:
     """Fetch transcript via Supadata API — works from any IP including HuggingFace cloud.
-    Handles async jobs (HTTP 202) for videos longer than 20 minutes."""
+    Handles async jobs (HTTP 202) for videos longer than 20 minutes.
+    Raises SupadataQuotaError on HTTP 429 / limit-exceeded so the caller can rotate keys."""
     import time
     import requests as _req
 
@@ -222,7 +228,13 @@ def _try_supadata(video_id: str, api_key: str) -> Optional[str]:
             logger.warning("[SUPADATA] Async job timed out for %s", video_id)
             return None
 
+        # Quota / rate-limit exhausted for this key — let the caller rotate to the next one.
+        if resp.status_code == 429 or "limit-exceeded" in resp.text.lower():
+            raise SupadataQuotaError(f"Supadata limit-exceeded ({resp.status_code})")
+
         logger.warning("[SUPADATA] API error %d for %s: %s", resp.status_code, video_id, resp.text[:200])
+    except SupadataQuotaError:
+        raise
     except Exception as e:
         logger.debug("[SUPADATA] Failed for %s: %s", video_id, e)
     return None
@@ -388,7 +400,7 @@ def _try_whisper(video_id: str) -> str:
 def get_transcript(video_id: str) -> str:
     """Fetch transcript via 5-tier fallback chain.
     Tiers 1-2 work locally; Tier 3 (Supadata) works from any IP including HuggingFace cloud."""
-    from config import ASSEMBLYAI_API_KEY, SUPADATA_API_KEY
+    from config import ASSEMBLYAI_API_KEY, SUPADATA_API_KEYS
 
     # Tier 1: YouTube Transcript API (fast, free — blocked on HuggingFace IPs)
     transcript = _try_transcript_api(video_id)
@@ -401,15 +413,25 @@ def get_transcript(video_id: str) -> str:
     if transcript:
         return transcript
 
-    # Tier 3: Supadata — cloud transcript API, works from any IP including HuggingFace
-    if SUPADATA_API_KEY:
-        logger.info("[YT] Trying Supadata for %s", video_id)
-        transcript = _try_supadata(video_id, SUPADATA_API_KEY)
-        if transcript:
-            return transcript
-        logger.warning("[YT] Supadata returned no transcript for %s", video_id)
+    # Tier 3: Supadata — cloud transcript API, works from any IP including HuggingFace.
+    # On a cloud host this is the ONLY tier that can succeed (the rest need direct YouTube
+    # access, which datacenter IPs are blocked from). Rotate across all configured keys so
+    # one key hitting its monthly limit doesn't take the whole feature down.
+    supadata_quota_hit = False
+    if SUPADATA_API_KEYS:
+        for idx, sk in enumerate(SUPADATA_API_KEYS):
+            logger.info("[YT] Trying Supadata key #%d for %s", idx + 1, video_id)
+            try:
+                transcript = _try_supadata(video_id, sk)
+            except SupadataQuotaError:
+                supadata_quota_hit = True
+                logger.warning("[YT] Supadata key #%d quota exhausted for %s — rotating", idx + 1, video_id)
+                continue
+            if transcript:
+                return transcript
+            logger.warning("[YT] Supadata key #%d returned no transcript for %s", idx + 1, video_id)
     else:
-        logger.warning("[YT] SUPADATA_API_KEY not set — skipping Supadata for %s", video_id)
+        logger.warning("[YT] No SUPADATA_API_KEY set — skipping Supadata for %s", video_id)
 
     # Tier 4: AssemblyAI — yt-dlp download + upload (works locally, blocked on HuggingFace)
     assemblyai_err = ""
@@ -431,7 +453,15 @@ def get_transcript(video_id: str) -> str:
         err = str(e)
         if "25 MB" in err or "too large" in err.lower():
             raise ValueError("This video is too long to transcribe (audio exceeds 25 MB limit).")
-        if not SUPADATA_API_KEY:
+        if supadata_quota_hit:
+            raise ValueError(
+                "The transcript service (Supadata) has reached its usage limit, so this lecture's "
+                "captions can't be fetched right now. On a cloud host this is the only way to read "
+                "YouTube captions. Fix: wait for the monthly quota to reset, upgrade the Supadata plan, "
+                "or add more free keys as SUPADATA_API_KEY_2 / SUPADATA_API_KEY_3 secrets and restart. "
+                "(Supadata is a YouTube transcript service — it is NOT related to Supabase.)"
+            )
+        if not SUPADATA_API_KEYS:
             raise ValueError(
                 "This video's transcript could not be fetched. "
                 "To fix: get a free API key from supadata.ai and add it as "
