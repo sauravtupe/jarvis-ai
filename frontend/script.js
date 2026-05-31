@@ -2260,6 +2260,9 @@ async function sendMessage(textOverride) {
                     if (data.practicals) {
                         renderPracticalBundle(data.practicals, contentEl);
                     }
+                    if (data.notes) {
+                        renderNotesCard(data.notes, contentEl);
+                    }
                     if ('chunk' in data) {
                         const chunkText = data.chunk || '';
                         if (chunkText && !firstChunkReceived) {
@@ -2366,13 +2369,17 @@ function renderYouTubeChoiceButtons(videoId, contentEl) {
     const pracBtn = document.createElement('button');
     pracBtn.className = 'yt-choice-btn';
     pracBtn.innerHTML = '&#128170; Practical Exercises';
+    const notesBtn = document.createElement('button');
+    notesBtn.className = 'yt-choice-btn';
+    notesBtn.innerHTML = '&#128221; Notes / PPT';
     wrap.appendChild(mcqBtn);
     wrap.appendChild(sumBtn);
     wrap.appendChild(pracBtn);
+    wrap.appendChild(notesBtn);
     target.appendChild(wrap);
     scrollToBottom();
 
-    const disableAll = () => { mcqBtn.disabled = true; sumBtn.disabled = true; pracBtn.disabled = true; };
+    const disableAll = () => { mcqBtn.disabled = true; sumBtn.disabled = true; pracBtn.disabled = true; notesBtn.disabled = true; };
     mcqBtn.addEventListener('click', () => {
         disableAll();
         mcqBtn.classList.add('selected');
@@ -2388,6 +2395,82 @@ function renderYouTubeChoiceButtons(videoId, contentEl) {
         pracBtn.classList.add('selected');
         startPracticals(videoId);
     });
+    notesBtn.addEventListener('click', () => {
+        notesBtn.classList.add('selected');
+        startNotes();
+    });
+}
+
+// Ask the server for this session's lecture notes (resolved from pending_youtube
+// context) and render the link card. Mirrors startPracticals' SSE read.
+async function startNotes() {
+    const loadingEl = addMessage('assistant', 'Fetching the notes for this lesson, Sir…');
+    try {
+        const res = await fetch(`${API}/chat/jarvis/stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({
+                message: 'give me notes for this session',
+                session_id: sessionId,
+                tts: false,
+            }),
+        });
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let notes = null;
+        let text = '';
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop() || '';
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.notes) notes = data.notes;
+                    if ('chunk' in data) text += (data.chunk || '');
+                } catch (_) {}
+            }
+        }
+        if (loadingEl && loadingEl.closest('.message')) loadingEl.closest('.message').remove();
+        const contentEl = addMessage('assistant', notes ? '' : (text || "Sir, no notes are saved for this lesson yet.")).parentElement.querySelector('.msg-content');
+        if (notes) renderNotesCard(notes, contentEl);
+    } catch (e) {
+        if (loadingEl) loadingEl.textContent = `Sorry Sir, I couldn't load the notes: ${e.message}`;
+    }
+}
+
+// Render a clickable notes card and open the document in a new tab.
+function renderNotesCard(notes, contentEl) {
+    const target = contentEl || Array.from(
+        document.querySelectorAll('.message.assistant .msg-content')
+    ).pop();
+    if (!target || !notes || !notes.notes_url) return;
+    const href = safeUrlForHref(notes.notes_url);
+    if (!href) return;
+
+    const friendlyClass = notes.class_name === 'UKG' ? 'UKG' : `Class ${String(notes.class_name).replace('class_', '')}`;
+    const typeLabel = ({ slides: 'Slides', pdf: 'PDF', ppt: 'PowerPoint', doc: 'Document' })[notes.notes_type] || 'Notes';
+    const icon = notes.notes_type === 'pdf' ? '📄' : (notes.notes_type === 'ppt' || notes.notes_type === 'slides') ? '📊' : '📝';
+
+    const card = document.createElement('div');
+    card.className = 'notes-card';
+    card.innerHTML = `
+        <div class="notes-card-icon">${icon}</div>
+        <div class="notes-card-body">
+            <div class="notes-card-title">${escapeHtml(friendlyClass)} • Chapter ${notes.chapter} Notes</div>
+            <div class="notes-card-meta">${escapeHtml(typeLabel)}${notes.title ? ' • ' + escapeHtml(notes.title) : ''}</div>
+        </div>
+        <a class="notes-card-open" href="${href}" target="_blank" rel="noopener">Open ↗</a>`;
+    target.appendChild(card);
+    scrollToBottom();
+
+    // Auto-open in a new tab (the student asked for "notes on this session").
+    try { window.open(href, '_blank', 'noopener'); } catch (_) {}
 }
 
 function renderPracticeFiles(payload, contentEl) {
@@ -2898,17 +2981,30 @@ function renderPracticalBundle(bundle, contentEl) {
     if (!target || !bundle) return;
     const friendlyClass = bundle.class_name === 'UKG' ? 'UKG' : `Class ${bundle.class_name.replace('class_', '')}`;
     const wrap = document.createElement('div');
-    wrap.className = 'practical-bundle';
+    // practice-sheet gives a clean white, high-contrast, printable surface so the
+    // animated background doesn't bleed through the questions.
+    wrap.className = 'practical-bundle practice-sheet';
+
+    const practiceTasks = bundle.practice_tasks || [];
 
     const header = document.createElement('div');
     header.className = 'practical-bundle-header';
     header.innerHTML = `
-        <span class="practical-bundle-title">💪 Practice</span>
-        <span class="practical-bundle-context">${escapeHtml(friendlyClass)} • Chapter ${bundle.chapter}${bundle.lecture && bundle.lecture.title ? ' • ' + escapeHtml(bundle.lecture.title) : ''}</span>
+        <div class="practical-bundle-heading">
+            <span class="practical-bundle-title">💪 Practice</span>
+            <span class="practical-bundle-context">${escapeHtml(friendlyClass)} • Chapter ${bundle.chapter}${bundle.lecture && bundle.lecture.title ? ' • ' + escapeHtml(bundle.lecture.title) : ''}</span>
+        </div>
     `;
+    // Download button — only meaningful when there are activities to put on the sheet.
+    if (practiceTasks.length > 0) {
+        const dlBtn = document.createElement('button');
+        dlBtn.className = 'practice-download-pdf-btn';
+        dlBtn.innerHTML = '⬇ Download';
+        dlBtn.title = 'Download this practice sheet as a PDF';
+        dlBtn.addEventListener('click', () => buildPracticePdf(bundle));
+        header.appendChild(dlBtn);
+    }
     wrap.appendChild(header);
-
-    const practiceTasks = bundle.practice_tasks || [];
     const curated = bundle.curated || [];
     const pdfs = bundle.class_pdfs || [];
 
@@ -2991,6 +3087,105 @@ function renderPracticalBundle(bundle, contentEl) {
 
     target.appendChild(wrap);
     scrollToBottom();
+}
+
+// Build a clean, printable PDF of the practice activities using jsPDF (vendored).
+// Teacher uses this to hand out homework; students can self-print too.
+function buildPracticePdf(bundle) {
+    const jspdfNS = window.jspdf || {};
+    const JsPDF = jspdfNS.jsPDF;
+    if (!JsPDF) {
+        showToast('PDF library not loaded — try refreshing the page.', 6000);
+        return;
+    }
+    const tasks = (bundle && bundle.practice_tasks) || [];
+    if (!tasks.length) {
+        showToast('No activities to download.', 4000);
+        return;
+    }
+
+    const doc = new JsPDF({ unit: 'pt', format: 'a4' });
+    const PAGE_W = doc.internal.pageSize.getWidth();
+    const PAGE_H = doc.internal.pageSize.getHeight();
+    const M = 48;                       // margin
+    const MAX_W = PAGE_W - M * 2;
+    let y = M;
+
+    const friendlyClass = bundle.class_name === 'UKG' ? 'UKG' : `Class ${String(bundle.class_name).replace('class_', '')}`;
+    const lectureTitle = (bundle.lecture && bundle.lecture.title) || '';
+
+    // Page-break helper — start a new page if the next block won't fit.
+    const ensure = (needed) => {
+        if (y + needed > PAGE_H - M) { doc.addPage(); y = M; }
+    };
+    // Write wrapped text. Returns nothing; advances y.
+    const writeLines = (text, { size = 11, style = 'normal', color = [33, 37, 41], indent = 0, gap = 4, lineH } = {}) => {
+        doc.setFont('helvetica', style);
+        doc.setFontSize(size);
+        doc.setTextColor(color[0], color[1], color[2]);
+        const lh = lineH || size * 1.35;
+        const lines = doc.splitTextToSize(String(text == null ? '' : text), MAX_W - indent);
+        for (const ln of lines) {
+            ensure(lh);
+            doc.text(ln, M + indent, y);
+            y += lh;
+        }
+        y += gap;
+    };
+    const hr = () => {
+        ensure(12);
+        doc.setDrawColor(222, 226, 230);
+        doc.setLineWidth(0.7);
+        doc.line(M, y, PAGE_W - M, y);
+        y += 14;
+    };
+
+    // ── Header ──
+    writeLines(`${friendlyClass} · Chapter ${bundle.chapter} — Practice Sheet`, { size: 18, style: 'bold', gap: 2 });
+    if (lectureTitle) writeLines(lectureTitle, { size: 12, style: 'normal', color: [108, 117, 125], gap: 2 });
+    writeLines(`Generated by J.A.R.V.I.S · ${new Date().toLocaleDateString()}`, { size: 9, color: [134, 142, 150], gap: 6 });
+    hr();
+
+    tasks.forEach((t, i) => {
+        ensure(40);
+        writeLines(`${i + 1}. ${t.title || 'Activity'}`, { size: 13, style: 'bold', gap: 3 });
+
+        const meta = [t.activity_type, t.difficulty, (t.estimated_minutes ? `${t.estimated_minutes} min` : '')]
+            .filter(Boolean).join('  ·  ');
+        if (meta) writeLines(meta, { size: 9, color: [108, 117, 125], gap: 5 });
+
+        if (t.description) writeLines(t.description, { size: 11, gap: 6 });
+
+        const steps = t.steps || [];
+        if (steps.length) {
+            writeLines('Steps:', { size: 11, style: 'bold', gap: 2 });
+            steps.forEach((s, si) => writeLines(`${si + 1}. ${s}`, { size: 11, indent: 16, gap: 2 }));
+            y += 3;
+        }
+
+        const materials = t.materials || [];
+        if (materials.length) {
+            writeLines("You'll need:", { size: 11, style: 'bold', gap: 2 });
+            materials.forEach(m => writeLines(`• ${m}`, { size: 11, indent: 16, gap: 2 }));
+            y += 3;
+        }
+
+        if (t.starter_code) {
+            writeLines('Starter code:', { size: 11, style: 'bold', gap: 2 });
+            writeLines(t.starter_code, { size: 9.5, style: 'normal', color: [52, 58, 64], indent: 8, gap: 4, lineH: 12 });
+        }
+
+        const outcomes = t.learning_outcomes || [];
+        if (outcomes.length) {
+            writeLines("You'll learn:", { size: 11, style: 'bold', gap: 2 });
+            outcomes.forEach(o => writeLines(`• ${o}`, { size: 11, indent: 16, gap: 2 }));
+        }
+
+        if (i < tasks.length - 1) hr();
+    });
+
+    const fname = `Practice_${friendlyClass.replace(/\s+/g, '')}_Chapter${bundle.chapter}.pdf`;
+    doc.save(fname);
 }
 
 function renderMarkdown(text) {
@@ -3245,6 +3440,7 @@ function _showLectureForm(mode, lec) {
     const ch = $('lecture-chapter');
     const t = $('lecture-title');
     const url = $('lecture-url');
+    const notesUrl = $('lecture-notes-url');
     const err = $('lecture-form-error');
     if (err) err.style.display = 'none';
     if (mode === 'edit' && lec) {
@@ -3255,6 +3451,7 @@ function _showLectureForm(mode, lec) {
         if (ch) { ch.value = lec.chapter; ch.disabled = true; }
         if (t) t.value = lec.title || '';
         if (url) url.value = lec.youtube_url || '';
+        if (notesUrl) notesUrl.value = lec.notes_url || '';
     } else {
         if (title) title.textContent = 'Add Lecture';
         if (mode_input) mode_input.value = 'add';
@@ -3263,6 +3460,7 @@ function _showLectureForm(mode, lec) {
         if (ch) { ch.disabled = false; ch.value = ''; }
         if (t) t.value = '';
         if (url) url.value = '';
+        if (notesUrl) notesUrl.value = '';
     }
     if (form) form.style.display = '';
 }
@@ -3280,6 +3478,7 @@ async function _saveLectureForm() {
     const chRaw = ($('lecture-chapter') || {}).value || '';
     const titleVal = (($('lecture-title') || {}).value || '').trim();
     const urlVal = (($('lecture-url') || {}).value || '').trim();
+    const notesVal = (($('lecture-notes-url') || {}).value || '').trim();
     const err = $('lecture-form-error');
     const saveBtn = $('lecture-form-save');
 
@@ -3322,6 +3521,14 @@ async function _saveLectureForm() {
             }
         }
         if (res.ok) {
+            // Persist the notes URL too (separate endpoint). The lecture now exists,
+            // so set/clear is safe. A bad notes URL keeps the form open so it can be fixed.
+            const notesOk = await _saveLectureNotes(cls, ch, notesVal, setErr);
+            if (!notesOk) {
+                if (saveBtn) saveBtn.disabled = false;
+                _refreshLecturesList();   // lecture itself saved fine
+                return;
+            }
             showToast(mode === 'edit' ? 'Lecture updated.' : 'Lecture added.');
             _hideLectureForm();
             _refreshLecturesList();
@@ -3334,6 +3541,36 @@ async function _saveLectureForm() {
         setErr(`Network error: ${e.message}`);
     } finally {
         if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
+// Save or clear the notes URL for a lecture. Returns true on success (incl. no-op),
+// false if a non-empty URL was rejected (so the caller can keep the form open).
+async function _saveLectureNotes(cls, ch, notesVal, setErr) {
+    try {
+        if (notesVal) {
+            const res = await _adminFetch(`/lectures/${cls}/${ch}/notes`, {
+                method: 'PUT',
+                body: JSON.stringify({ notes_url: notesVal }),
+            });
+            if (!res.ok) {
+                let detail = `Notes URL rejected (HTTP ${res.status}).`;
+                try { const j = await res.json(); detail = j.detail || detail; } catch (_) {}
+                if (setErr) setErr(detail);
+                return false;
+            }
+        } else {
+            // No URL — clear any existing notes. 404 just means there were none.
+            const res = await _adminFetch(`/lectures/${cls}/${ch}/notes`, { method: 'DELETE' });
+            if (!res.ok && res.status !== 404 && res.status !== 204) {
+                // Non-fatal: lecture saved, notes clear failed. Surface but don't block.
+                showToast(`Note: couldn't clear old notes (HTTP ${res.status}).`, 5000);
+            }
+        }
+        return true;
+    } catch (e) {
+        if (setErr) setErr(`Network error saving notes: ${e.message}`);
+        return false;
     }
 }
 
@@ -3431,10 +3668,22 @@ function _practiceToggleButtons() {
     const saveBtn = $('practice-save-btn');
     const clearBtn = $('practice-clear-btn');
     const genBtn = $('practice-generate-btn');
+    const dlBtn = $('practice-download-btn');
     const hasWorking = _practiceWorkingSet.length > 0;
     if (saveBtn) saveBtn.style.display = hasWorking ? '' : 'none';
     if (clearBtn) clearBtn.style.display = _practiceSavedExists ? '' : 'none';
+    if (dlBtn) dlBtn.style.display = hasWorking ? '' : 'none';
     if (genBtn) genBtn.textContent = hasWorking ? '🔄 Regenerate' : '✨ Generate Practice';
+}
+
+// Download the current admin working set as a PDF (homework distribution).
+function _downloadPracticePdf() {
+    buildPracticePdf({
+        class_name: _practicalsCurrentClass,
+        chapter: _practicalsCurrentChapter,
+        lecture: { title: _practicalsCurrentLectureTitle || '' },
+        practice_tasks: _practiceWorkingSet,
+    });
 }
 
 function _renderPracticeAdminCards() {
@@ -3576,12 +3825,14 @@ async function _clearSavedPractice() {
         const genBtn = $('practice-generate-btn');
         const saveBtn = $('practice-save-btn');
         const clearBtn = $('practice-clear-btn');
+        const dlBtn = $('practice-download-btn');
 
         if (closeBtn) closeBtn.addEventListener('click', () => _closePracticalsAdminPanel(true));
         if (backBtn) backBtn.addEventListener('click', () => _closePracticalsAdminPanel(false));
         if (genBtn) genBtn.addEventListener('click', _generatePractice);
         if (saveBtn) saveBtn.addEventListener('click', _savePractice);
         if (clearBtn) clearBtn.addEventListener('click', _clearSavedPractice);
+        if (dlBtn) dlBtn.addEventListener('click', _downloadPracticePdf);
     };
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', bindWhenReady);

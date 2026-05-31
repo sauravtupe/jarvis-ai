@@ -20,7 +20,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
     <!-- Supabase JS — Google OAuth -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-    <link rel="stylesheet" href="style.css?v=20260526a">
+    <link rel="stylesheet" href="style.css?v=20260531a">
 </head>
 <body>
     <canvas id="particles-bg"></canvas>
@@ -289,6 +289,10 @@
                         <label for="lecture-url">YouTube URL</label>
                         <input type="text" id="lecture-url" placeholder="https://www.youtube.com/watch?v=...">
                     </div>
+                    <div class="lecture-form-row">
+                        <label for="lecture-notes-url">Notes / PPT URL <span class="lecture-form-optional">(optional)</span></label>
+                        <input type="text" id="lecture-notes-url" placeholder="Google Slides / Drive / Dropbox / direct .pdf .ppt .pptx">
+                    </div>
                     <p class="lecture-form-error" id="lecture-form-error" style="display:none"></p>
                     <div class="lecture-form-actions">
                         <button class="btn-secondary" id="lecture-form-cancel">Cancel</button>
@@ -319,6 +323,7 @@
                 <div class="practice-admin-toolbar">
                     <button class="btn-primary" id="practice-generate-btn">✨ Generate Practice</button>
                     <button class="btn-primary" id="practice-save-btn" style="display:none">Save for students</button>
+                    <button class="btn-secondary" id="practice-download-btn" style="display:none">⬇ Download PDF</button>
                     <button class="btn-secondary" id="practice-clear-btn" style="display:none">Clear saved</button>
                 </div>
                 <p class="practice-admin-status" id="practice-admin-status"></p>
@@ -441,7 +446,9 @@
             <p class="login-note">Your data stays private and secure</p>
         </div>
     </div>
+    <!-- jsPDF — client-side PDF generation for downloadable practice sheets -->
+    <script src="vendor/jspdf.umd.min.js?v=251"></script>
     <script src="orb.js?v=20260524l"></script>
-    <script src="script.js?v=20260524l"></script>
+    <script src="script.js?v=20260531a"></script>
 </body>
 </html>

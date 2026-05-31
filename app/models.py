@@ -98,6 +98,8 @@ class LectureRecord(BaseModel):
     title: str
     youtube_url: str
     video_id: str
+    notes_url: str = ""
+    notes_type: str = ""
     created_at: str
     updated_at: str
 
@@ -190,3 +192,18 @@ class PracticeGenerateResult(BaseModel):
 class PracticeSaveRequest(BaseModel):
     """Teacher saves the reviewed practice tasks onto a lecture."""
     tasks: List[AIPracticalTask]
+
+
+# Feature: Notes / PPT integration — one URL per lecture (PPT/PDF/Slides/Doc)
+class NotesSaveRequest(BaseModel):
+    """Teacher saves a Notes / PPT / PDF URL onto a lecture."""
+    notes_url: str = Field(..., min_length=1, max_length=2000)
+
+
+class NotesRecord(BaseModel):
+    class_name: str
+    chapter: int
+    notes_url: str
+    notes_type: str = "link"   # slides | pdf | ppt | doc | link
+    notes_added_at: str = ""
+    title: str = ""

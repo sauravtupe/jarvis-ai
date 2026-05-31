@@ -30,6 +30,7 @@ from app.models import (
     PracticalCreate, PracticalRecord, PracticalBundle,
     AIPracticalRequest, AIPracticalResponse, AIPracticalTask,
     PracticeGenerateResult, PracticeSaveRequest,
+    NotesSaveRequest, NotesRecord,
 )
 
 RATE_LIMIT_MESSAGE = (
@@ -737,6 +738,11 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
 
             if isinstance(chunk, dict) and "_practicals" in chunk:
                 yield f"data: {json.dumps({'practicals': chunk['_practicals']})}\n\n"
+                yield from _yield_completed_audio()
+                continue
+
+            if isinstance(chunk, dict) and "_notes" in chunk:
+                yield f"data: {json.dumps({'notes': chunk['_notes']})}\n\n"
                 yield from _yield_completed_audio()
                 continue
 
@@ -1504,6 +1510,51 @@ async def admin_clear_practice(
         return Response(status_code=204)
     except (practical_service.PracticalError, lecture_service.LectureError) as e:
         raise _practical_error_to_http(e)
+
+
+# ─── Notes / PPT per lecture ────────────────────────────────────────────────
+
+@app.get("/lectures/{class_name}/{chapter}/notes", response_model=NotesRecord)
+async def get_lecture_notes(class_name: str, chapter: int):
+    """Public — return the saved notes URL for a lecture. 404 if none saved."""
+    try:
+        notes = lecture_service.get_notes(class_name=class_name, chapter=chapter)
+    except lecture_service.LectureError as e:
+        raise _lecture_error_to_http(e)
+    if not notes:
+        raise HTTPException(status_code=404, detail="No notes saved for this lecture")
+    return NotesRecord(**notes)
+
+
+@app.put("/lectures/{class_name}/{chapter}/notes", response_model=NotesRecord)
+async def set_lecture_notes(
+    class_name: str,
+    chapter: int,
+    request: NotesSaveRequest,
+    _: bool = Depends(require_admin),
+):
+    """Admin: attach (or replace) the notes / PPT / PDF URL on a lecture."""
+    try:
+        rec = lecture_service.set_notes(
+            class_name=class_name, chapter=chapter, notes_url=request.notes_url,
+        )
+        return NotesRecord(**rec)
+    except lecture_service.LectureError as e:
+        raise _lecture_error_to_http(e)
+
+
+@app.delete("/lectures/{class_name}/{chapter}/notes", status_code=204)
+async def clear_lecture_notes(
+    class_name: str,
+    chapter: int,
+    _: bool = Depends(require_admin),
+):
+    """Admin: clear the notes URL from a lecture."""
+    try:
+        lecture_service.clear_notes(class_name=class_name, chapter=chapter)
+        return Response(status_code=204)
+    except lecture_service.LectureError as e:
+        raise _lecture_error_to_http(e)
 
 
 @app.post("/practicals/generate", response_model=AIPracticalResponse)

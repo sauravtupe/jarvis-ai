@@ -382,9 +382,50 @@ class ChatService:
 
         yield {"_activity": {"event": "query_detected", "message": user_message}}
 
-        # --- Lecture catalog command (pre-brain shortcut, Feature 8) ---
         from app.services import quiz_service as _qs
         from app.services import lecture_service as _ls
+
+        # --- Notes / PPT command (pre-brain shortcut) ---
+        # MUST run before the lecture-open shortcut: "class 1 chapter 2 notes" also
+        # satisfies the lecture gate, but the student wants the notes, not the video.
+        _pending_yt_for_notes = self.get_session_metadata(session_id, "pending_youtube")
+        _notes_cmd = _ls.match_notes_command(user_message, pending_youtube=_pending_yt_for_notes)
+        if _notes_cmd is not None:
+            if _notes_cmd.get("_missing") == "class_chapter":
+                _resp = (
+                    "Sure, Sir! Which class and chapter notes would you like? "
+                    "For example, say 'give me Class 1 Chapter 2 notes'."
+                )
+                self.sessions[session_id][-1].content = _resp
+                yield _resp
+                self.save_chat_session(session_id)
+                return
+
+            _class_display = "UKG" if _notes_cmd["class_name"] == "UKG" else f"Class {_notes_cmd['class_num']}"
+            try:
+                _notes = _ls.get_notes(_notes_cmd["class_name"], _notes_cmd["chapter"])
+            except Exception as _e:
+                logger.warning("[NOTES] lookup failed for %s / %d: %s",
+                               _notes_cmd["class_name"], _notes_cmd["chapter"], _e)
+                _notes = None
+
+            if _notes:
+                yield {"_notes": _notes}
+                _resp = (
+                    f"Here are the notes for {_class_display} Chapter {_notes_cmd['chapter']}, Sir — "
+                    f"opening them in a new tab."
+                )
+            else:
+                _resp = (
+                    f"Sir, your teacher hasn't added notes for {_class_display} "
+                    f"Chapter {_notes_cmd['chapter']} yet."
+                )
+            self.sessions[session_id][-1].content = _resp
+            yield _resp
+            self.save_chat_session(session_id)
+            return
+
+        # --- Lecture catalog command (pre-brain shortcut, Feature 8) ---
         _lec = _ls.match_lecture_command(user_message)
         if _lec:
             if _lec.get("_not_found"):

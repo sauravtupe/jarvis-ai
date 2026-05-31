@@ -32,6 +32,8 @@ Use `user_id = 'test-user-001'` as placeholder everywhere user data is saved. Wh
 | Classroom AI | Not built |
 | Lecture Catalog + Admin Panel | Working (Class → Chapter, S3-backed, bilingual voice commands) |
 | Practice (age/grade/lesson-aware, teacher-generated) | Working (UKG→Grade 12 age bands, coding gate Grade 6+ only if taught) |
+| Practice sheet PDF download (jsPDF) | Working (student + admin; clean white printable sheet) |
+| Notes / PPT per lecture (link retrieval) | Working (admin sets URL on lecture; "give me class N chapter M notes" → opens in new tab) |
 | 3D UI + Avatar | Not built |
 
 ---
@@ -132,6 +134,7 @@ User message → brain_service (classify intent)
 Always use `/chat/jarvis/stream` as the single main endpoint — never call mode-specific endpoints directly from the frontend.
 
 **Pre-brain shortcuts** in `chat_service.process_message_stream()` run *before* brain routing and short-circuit the flow for known patterns:
+- **Notes command** — if `match_notes_command()` fires (e.g. *"give me class 1 chapter 2 notes"*, *"UKG chapter 1 notes"*, *"notes for this session"*, or Hindi *"नोट्स"*), look up the lecture's saved `notes_url` and yield `_notes` so the frontend renders a clickable card and opens it in a new tab. **Runs FIRST — before the lecture-open shortcut** — because *"class N chapter M notes"* also satisfies the lecture gate, but the student wants the notes, not the video.
 - **YouTube URL detection** — if the user pastes a YouTube link, set `pending_youtube` + yield `_youtube_detected`, skip brain.
 - **Lecture command** *(Feature 8)* — if the message matches `match_lecture_command()` (e.g. *"open class 5 chapter 3"* or *"क्लास 5 चैप्टर 3 खोलो"*), look up `database/lectures.json` and fall through into the same YouTube flow. Brain is never invoked.
 - **Practice command** *(Feature 9)* — if `match_practical_command()` fires (e.g. *"practice for class 6 chapter 1"* / *"क्लास 6 चैप्टर 1 का प्रैक्टिकल"*), serve the bundle (teacher-saved `practice_tasks` + legacy curated links + class PDFs), skip brain. Practice is **teacher-generated** (admin Lecture Panel → Generate Practice → Save); it's age/grade/lesson-aware and coding only appears at Grade 6+ when the lesson teaches it.
@@ -166,6 +169,8 @@ TTS is generated via `edge-tts` and returned as base64 audio chunks over SSE alo
 | POST | `/quiz/summary` | YouTube → structured summary |
 | POST | `/admin/login` | *(Feature 8)* Verify `ADMIN_TOKEN`, returns `{ok}` or 401 |
 | GET/POST/PUT/DELETE | `/lectures(/...)` | *(Feature 8)* Lecture catalog CRUD — **admin-only** via `X-Admin-Token` header |
+| GET | `/lectures/{class}/{chapter}/notes` | *(Notes)* Public — returns saved `{notes_url, notes_type, title}`, 404 if none |
+| PUT/DELETE | `/lectures/{class}/{chapter}/notes` | *(Notes)* **admin** — set / clear a PPT/PDF/Slides URL on a lecture (host-allowlisted: Google Slides/Docs/Drive, Dropbox, direct `.pdf/.ppt/.pptx`) |
 | GET | `/lectures/{class}/{chapter}/practicals` | *(Feature 9)* Public — returns `{practice_tasks, curated, class_pdfs}` bundle |
 | POST | `/lectures/{class}/{chapter}/practice/generate` | *(Feature 9)* **admin** — generate grade-aware practice (preview, not saved) |
 | PUT/DELETE | `/lectures/{class}/{chapter}/practice` | *(Feature 9)* **admin** — save / clear teacher-reviewed practice |
