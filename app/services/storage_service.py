@@ -129,6 +129,39 @@ def _hf_list(prefix: str) -> list:
         return []
 
 
+def _hf_list_older_than(prefix: str, hours: int) -> list:
+    """Return HF dataset file keys under prefix older than `hours` (by last commit date)."""
+    api = _get_hf_api()
+    if not api:
+        return []
+    cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
+    path_in_repo = prefix.rstrip("/") or None
+    keys = []
+    try:
+        # expand=True populates each RepoFile.last_commit.date so we can age files.
+        for item in api.list_repo_tree(
+            repo_id=HF_DATA_REPO,
+            repo_type="dataset",
+            path_in_repo=path_in_repo,
+            recursive=True,
+            expand=True,
+        ):
+            # Both RepoFile and RepoFolder carry last_commit; only delete files.
+            if type(item).__name__ != "RepoFile":
+                continue
+            last_commit = getattr(item, "last_commit", None)
+            date = getattr(last_commit, "date", None)
+            if date is not None and date.timestamp() < cutoff:
+                keys.append(item.path)
+    except Exception as e:
+        name = type(e).__name__
+        if "NotFound" in name:
+            return []
+        logger.warning("[STORAGE] HF dataset age-list failed for prefix %s: %s", prefix, e)
+        return []
+    return keys
+
+
 def _hf_delete(key: str) -> bool:
     api = _get_hf_api()
     if not api:
@@ -213,9 +246,11 @@ def delete_s3_object(key: str) -> bool:
 
 
 def list_s3_objects_older_than(prefix: str, hours: int) -> list:
-    """Return S3 object keys under prefix that are older than `hours`."""
+    """Return object keys under prefix older than `hours` (S3 or HF dataset)."""
     client = _get_s3_client()
     if not client:
+        if _hf_enabled():
+            return _hf_list_older_than(prefix, hours)
         return []
     cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
     keys = []

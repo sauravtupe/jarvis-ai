@@ -120,13 +120,18 @@ def print_title():
 
 
 def _clean_old_s3_captures():
-    """APScheduler job: delete S3 camera captures older than 8 hours. Runs every hour."""
-    keys = list_s3_objects_older_than(prefix="camera/", hours=8)
+    """APScheduler job: delete camera captures older than 2 hours (S3 or HF dataset).
+
+    Camera images are kept only briefly for reference — the vision model analyses
+    them inline via base64, so they are never needed long-term. Runs every hour,
+    so a capture is purged within ~2-3 hours of being taken.
+    """
+    keys = list_s3_objects_older_than(prefix="camera/", hours=2)
     if not keys:
-        logger.info("[SCHEDULER] S3 cleanup: nothing to delete")
+        logger.info("[SCHEDULER] Camera cleanup: nothing to delete")
         return
     deleted = sum(1 for k in keys if delete_s3_object(k))
-    logger.info("[SCHEDULER] S3 cleanup: deleted %d / %d camera objects", deleted, len(keys))
+    logger.info("[SCHEDULER] Camera cleanup: deleted %d / %d camera objects", deleted, len(keys))
 
 
 def _keep_alive_ping():
@@ -270,14 +275,14 @@ async def lifespan(app: FastAPI):
                 task_manager.cleanup_old()
 
         scheduler = BackgroundScheduler()
-        scheduler.add_job(_clean_old_s3_captures, "interval", hours=1,
+        scheduler.add_job(_clean_old_s3_captures, "interval", minutes=30,
                           id="s3_cleanup", replace_existing=True)
         scheduler.add_job(_keep_alive_ping, "interval", minutes=4,
                           id="keep_alive", replace_existing=True)
         scheduler.add_job(_cleanup_tasks, "interval", minutes=30,
                           id="task_cleanup", replace_existing=True)
         scheduler.start()
-        logger.info("[SCHEDULER] APScheduler started — S3 cleanup every 1h, task cleanup every 30min, keep-alive ping every 4min")
+        logger.info("[SCHEDULER] APScheduler started — camera cleanup every 30min (purge >2h), task cleanup every 30min, keep-alive ping every 4min")
 
         yield
 
