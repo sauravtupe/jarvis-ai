@@ -3104,15 +3104,20 @@ function renderPracticalBundle(bundle, contentEl) {
     scrollToBottom();
 }
 
-// Build a printable practice sheet and hand it to the browser's "Save as PDF".
+// Print the practice sheet to PDF via a hidden iframe.
 //
-// We deliberately do NOT reconstruct the text with jsPDF: jsPDF's built-in
-// fonts only support Latin-1, so Hindi/Devanagari content (the lessons are
-// often generated in Hindi) came out as garbage — each Devanagari codepoint was
-// truncated to its low byte and rendered as a random Latin glyph. The browser,
-// by contrast, shapes Devanagari (and any Unicode script) correctly, so we
-// render the exact saved questions as HTML in a clean window and print them.
-// The result is a true, language-agnostic replica of the on-screen sheet.
+// Why a hidden iframe (not window.open + document.write): the popup approach
+// left a blank `about:blank` tab on the live Space — popups get downgraded /
+// the written auto-print script doesn't run, so nothing renders. The iframe
+// stays in the current tab: no popup blocker, no stray tab, and print() targets
+// ONLY the iframe's document.
+//
+// Why not jsPDF: jsPDF's built-in fonts are Latin-1 only, so Hindi/Devanagari
+// content (lessons are often in Hindi) came out as garbage — each codepoint was
+// truncated to its low byte and drawn as a random Latin glyph. The browser
+// shapes Devanagari (and any Unicode script) correctly, so we render the EXACT
+// same card HTML the on-screen sheet uses and let the browser print it. The PDF
+// is a true, identical replica of the on-screen practice sheet.
 function buildPracticePdf(bundle) {
     const tasks = (bundle && bundle.practice_tasks) || [];
     if (!tasks.length) {
@@ -3123,74 +3128,83 @@ function buildPracticePdf(bundle) {
     const friendlyClass = bundle.class_name === 'UKG' ? 'UKG' : `Class ${String(bundle.class_name).replace('class_', '')}`;
     const lectureTitle = (bundle.lecture && bundle.lecture.title) || '';
     const docTitle = `Practice_${friendlyClass.replace(/\s+/g, '')}_Chapter${bundle.chapter}`;
+    const context = `${friendlyClass} • Chapter ${bundle.chapter}${lectureTitle ? ' • ' + lectureTitle : ''}`;
 
-    const li = (items, ordered) => {
-        const tag = ordered ? 'ol' : 'ul';
-        return `<${tag}>${items.map(x => `<li>${escapeHtml(String(x))}</li>`).join('')}</${tag}>`;
-    };
+    // Reuse the EXACT on-screen card markup so the PDF matches the sheet 1:1.
+    const cardsHtml = tasks.map(t => _renderAITaskCard(t, {})).join('');
 
-    const activitiesHtml = tasks.map((t, i) => {
-        const meta = [t.activity_type, t.difficulty, (t.estimated_minutes ? `${t.estimated_minutes} min` : '')]
-            .filter(Boolean).map(x => escapeHtml(String(x))).join('  ·  ');
-        const steps = t.steps || [];
-        const materials = t.materials || [];
-        const outcomes = t.learning_outcomes || [];
-        let h = `<section class="activity">`;
-        h += `<h2>${i + 1}. ${escapeHtml(t.title || 'Activity')}</h2>`;
-        if (meta) h += `<div class="meta">${meta}</div>`;
-        if (t.description) h += `<p class="desc">${escapeHtml(t.description)}</p>`;
-        if (steps.length) h += `<div class="label">Steps:</div>${li(steps, true)}`;
-        if (materials.length) h += `<div class="label">You'll need:</div>${li(materials, false)}`;
-        if (t.starter_code) h += `<div class="label">Starter code:</div><pre>${escapeHtml(t.starter_code)}</pre>`;
-        if (outcomes.length) h += `<div class="label">You'll learn:</div>${li(outcomes, false)}`;
-        h += `</section>`;
-        return h;
-    }).join('');
-
-    const html = `<!doctype html><html><head><meta charset="utf-8">
+    // Self-contained stylesheet mirroring the on-screen .practice-sheet (white
+    // surface, dark text, the same coloured badges and purple activity accent).
+    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>${escapeHtml(docTitle)}</title>
 <style>
   * { box-sizing: border-box; }
   body { font-family: "Segoe UI", "Nirmala UI", system-ui, Arial, sans-serif;
-         color: #1f2937; background: #fff; margin: 0; padding: 40px 48px; line-height: 1.45; }
-  h1 { font-size: 22px; margin: 0 0 4px; }
-  .subtitle { color: #6c757d; font-size: 14px; margin: 0 0 2px; }
-  .generated { color: #868e96; font-size: 11px; margin: 0 0 14px; }
-  hr { border: none; border-top: 1px solid #dee2e6; margin: 14px 0; }
-  .activity { margin: 0 0 6px; page-break-inside: avoid; }
-  .activity h2 { font-size: 15px; margin: 14px 0 4px; }
-  .activity .meta { color: #6c757d; font-size: 11px; margin: 0 0 6px; }
-  .activity .desc { margin: 0 0 8px; }
-  .activity .label { font-weight: 700; margin: 8px 0 2px; }
-  ol, ul { margin: 0 0 8px; padding-left: 22px; }
-  li { margin: 2px 0; }
-  pre { background: #f1f3f5; color: #343a40; padding: 10px 12px; border-radius: 6px;
-        font-family: "Consolas", "Courier New", monospace; font-size: 12px;
-        white-space: pre-wrap; word-break: break-word; margin: 0 0 8px; }
-  @media print { body { padding: 0; } @page { margin: 18mm; } }
+         color: #1f2937; background: #fff; margin: 0; padding: 28px 32px; line-height: 1.45;
+         -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .sheet-header { border-bottom: 1px solid #e5e7eb; padding-bottom: 12px; margin-bottom: 16px; }
+  .sheet-title { font-size: 20px; font-weight: 700; color: #111827; }
+  .sheet-context { font-size: 13px; color: #6b7280; margin-top: 3px; }
+  .sheet-generated { font-size: 11px; color: #9ca3af; margin-top: 3px; }
+  .practical-cards { display: flex; flex-direction: column; gap: 12px; }
+  .practical-card { padding: 12px 14px; background: #fff; border: 1px solid #e5e7eb;
+                    border-left: 3px solid #a855f7; border-radius: 10px; page-break-inside: avoid; }
+  .practical-card-remove { display: none; }
+  .practical-card-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+                          font-size: 15px; font-weight: 600; color: #111827; margin-bottom: 6px; }
+  .practical-card-desc { font-size: 13px; color: #374151; line-height: 1.5; margin: 0 0 8px; }
+  .practical-badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500;
+                     padding: 2px 8px; border-radius: 10px; background: #eef2ff; color: #3730a3; }
+  .practical-activity { background: #f3e8ff; color: #6b21a8; }
+  .practical-platform { background: #e0e7ff; color: #3730a3; }
+  .practical-time { background: #fef3c7; color: #92400e; }
+  .practical-difficulty-beginner { background: #dcfce7; color: #166534; }
+  .practical-difficulty-intermediate { background: #fef3c7; color: #92400e; }
+  .practical-difficulty-advanced { background: #fee2e2; color: #991b1b; }
+  .practical-steps, .practical-outcomes, .practical-materials, .practical-resources {
+      font-size: 13px; color: #374151; margin-top: 8px; }
+  .practical-steps ol, .practical-outcomes ul, .practical-materials ul {
+      margin: 4px 0 0; padding-left: 22px; line-height: 1.55; }
+  .practical-resources { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .practical-resource-link { display: inline-block; font-size: 12px; color: #4338ca;
+      text-decoration: none; padding: 2px 8px; border: 1px solid #c7d2fe; border-radius: 8px; }
+  .practical-code { margin: 10px 0; padding: 10px 12px; background: #f8fafc; border: 1px solid #e5e7eb;
+      border-radius: 8px; font-size: 12px; color: #1e293b; white-space: pre-wrap; word-break: break-word;
+      font-family: "Consolas", "Courier New", monospace; }
+  .practical-code code { background: none; padding: 0; color: inherit; }
+  @page { margin: 16mm; }
 </style></head>
 <body>
-  <h1>${escapeHtml(friendlyClass)} · Chapter ${escapeHtml(String(bundle.chapter))} — Practice Sheet</h1>
-  ${lectureTitle ? `<p class="subtitle">${escapeHtml(lectureTitle)}</p>` : ''}
-  <p class="generated">Generated by J.A.R.V.I.S · ${escapeHtml(new Date().toLocaleDateString())}</p>
-  <hr>
-  ${activitiesHtml}
-  <script>
-    window.onload = function () {
-      setTimeout(function () { window.focus(); window.print(); }, 150);
-    };
-  <\/script>
+  <div class="sheet-header">
+    <div class="sheet-title">💪 Practice Sheet</div>
+    <div class="sheet-context">${escapeHtml(context)}</div>
+    <div class="sheet-generated">Generated by J.A.R.V.I.S · ${escapeHtml(new Date().toLocaleDateString())}</div>
+  </div>
+  <div class="practical-cards">${cardsHtml}</div>
 </body></html>`;
 
-    const win = window.open('', '_blank');
-    if (!win) {
-        showToast('Allow pop-ups to download the practice sheet as PDF.', 6000);
-        return;
-    }
-    win.document.title = docTitle;   // hints the default "Save as PDF" filename
-    win.document.open();
-    win.document.write(html);
-    win.document.close();
+    // Drop any previous print frame, then create a fresh off-screen one.
+    const prev = document.getElementById('practice-print-frame');
+    if (prev) prev.remove();
+
+    const iframe = document.createElement('iframe');
+    iframe.id = 'practice-print-frame';
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.title = docTitle;   // hints the default "Save as PDF" filename
+    // Off-screen with real dimensions so the inner document lays out for print.
+    iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;height:1123px;border:0;';
+    iframe.onload = () => {
+        try {
+            iframe.contentWindow.focus();
+            iframe.contentWindow.print();
+        } catch (e) {
+            showToast('Could not open the print dialog: ' + e.message, 6000);
+        }
+        // print() blocks until the dialog closes; clean up shortly after.
+        setTimeout(() => { try { iframe.remove(); } catch (_) {} }, 1000);
+    };
+    iframe.srcdoc = html;
+    document.body.appendChild(iframe);
 }
 
 function renderMarkdown(text) {
