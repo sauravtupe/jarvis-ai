@@ -11,6 +11,8 @@ from config import (
     AWS_SECRET_ACCESS_KEY,
     AWS_S3_BUCKET,
     AWS_REGION,
+    HF_TOKEN,
+    HF_DATA_REPO,
     VECTOR_STORE_DIR,
     CHATS_DATA_DIR,
     UPLOAD_DIR,
@@ -33,11 +35,130 @@ def _get_s3_client():
     )
 
 
+# ─── HuggingFace Dataset backend (free, no AWS) ──────────────────────────────
+# Used automatically when AWS is not configured. Keys map 1:1 to file paths
+# inside a private HuggingFace Dataset repo, so the existing S3 keys
+# ("lectures/lectures.json", "chats/<id>.json", …) work unchanged.
+
+_hf_repo_ready = False
+
+
+def _hf_enabled() -> bool:
+    return bool(HF_TOKEN and HF_DATA_REPO)
+
+
+def _get_hf_api():
+    if not _hf_enabled():
+        return None
+    try:
+        from huggingface_hub import HfApi
+    except Exception as e:
+        logger.warning("[STORAGE] huggingface_hub not available: %s", e)
+        return None
+    return HfApi(token=HF_TOKEN)
+
+
+def _ensure_hf_repo(api) -> bool:
+    """Create the private dataset repo on first use (idempotent)."""
+    global _hf_repo_ready
+    if _hf_repo_ready:
+        return True
+    try:
+        api.create_repo(repo_id=HF_DATA_REPO, repo_type="dataset", private=True, exist_ok=True)
+        _hf_repo_ready = True
+        return True
+    except Exception as e:
+        logger.error("[STORAGE] Could not create/access HF dataset %s: %s", HF_DATA_REPO, e)
+        return False
+
+
+def _hf_upload_bytes(data: bytes, key: str) -> Optional[str]:
+    api = _get_hf_api()
+    if not api or not _ensure_hf_repo(api):
+        return None
+    try:
+        import io
+        api.upload_file(
+            path_or_fileobj=io.BytesIO(data),
+            path_in_repo=key,
+            repo_id=HF_DATA_REPO,
+            repo_type="dataset",
+            commit_message=f"Update {key}",
+        )
+        logger.info("[STORAGE] HF dataset upload OK: %s", key)
+        return f"https://huggingface.co/datasets/{HF_DATA_REPO}/blob/main/{key}"
+    except Exception as e:
+        logger.error("[STORAGE] HF dataset upload failed for %s: %s", key, e)
+        return None
+
+
+def _hf_download(key: str) -> Optional[bytes]:
+    api = _get_hf_api()
+    if not api:
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_DATA_REPO,
+            filename=key,
+            repo_type="dataset",
+            token=HF_TOKEN,
+        )
+        return Path(path).read_bytes()
+    except Exception as e:
+        # EntryNotFound / RepositoryNotFound are expected on a fresh repo.
+        name = type(e).__name__
+        if "NotFound" in name or "EntryNotFound" in name:
+            return None
+        logger.warning("[STORAGE] HF dataset download failed for %s: %s", key, e)
+        return None
+
+
+def _hf_list(prefix: str) -> list:
+    api = _get_hf_api()
+    if not api:
+        return []
+    try:
+        files = api.list_repo_files(repo_id=HF_DATA_REPO, repo_type="dataset")
+        return [f for f in files if f.startswith(prefix)]
+    except Exception as e:
+        name = type(e).__name__
+        if "NotFound" in name:
+            return []
+        logger.warning("[STORAGE] HF dataset list failed for prefix %s: %s", prefix, e)
+        return []
+
+
+def _hf_delete(key: str) -> bool:
+    api = _get_hf_api()
+    if not api:
+        return False
+    try:
+        api.delete_file(path_in_repo=key, repo_id=HF_DATA_REPO, repo_type="dataset")
+        logger.info("[STORAGE] HF dataset deleted: %s", key)
+        return True
+    except Exception as e:
+        logger.error("[STORAGE] HF dataset delete failed for %s: %s", key, e)
+        return False
+
+
+def storage_backend() -> Optional[str]:
+    """Return the active durable backend: 's3', 'hf', or None (local-only)."""
+    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+        return "s3"
+    if _hf_enabled():
+        return "hf"
+    return None
+
+
 def upload_bytes_to_s3(data: bytes, key: str, content_type: str = "application/octet-stream") -> Optional[str]:
     """Upload bytes to S3. Returns public URL or None on failure/missing credentials."""
     client = _get_s3_client()
     if not client:
-        logger.warning("[STORAGE] AWS credentials not configured — skipping S3 upload for %s", key)
+        # No AWS — fall back to the free HuggingFace Dataset backend if configured.
+        if _hf_enabled():
+            return _hf_upload_bytes(data, key)
+        logger.warning("[STORAGE] No durable backend configured (set AWS_* or HF_TOKEN+HF_DATA_REPO) — skipping upload for %s", key)
         return None
     try:
         client.put_object(
@@ -58,6 +179,8 @@ def download_from_s3(key: str) -> Optional[bytes]:
     """Download object bytes from S3. Returns None if not found or S3 not configured."""
     client = _get_s3_client()
     if not client:
+        if _hf_enabled():
+            return _hf_download(key)
         return None
     try:
         response = client.get_object(Bucket=AWS_S3_BUCKET, Key=key)
@@ -77,6 +200,8 @@ def delete_s3_object(key: str) -> bool:
     """Delete a single S3 object. Returns True on success."""
     client = _get_s3_client()
     if not client:
+        if _hf_enabled():
+            return _hf_delete(key)
         return False
     try:
         client.delete_object(Bucket=AWS_S3_BUCKET, Key=key)
@@ -106,9 +231,11 @@ def list_s3_objects_older_than(prefix: str, hours: int) -> list:
 
 
 def list_s3_prefix(prefix: str) -> list:
-    """Return all S3 object keys under a given prefix."""
+    """Return all object keys under a given prefix (S3 or HF dataset)."""
     client = _get_s3_client()
     if not client:
+        if _hf_enabled():
+            return _hf_list(prefix)
         return []
     keys = []
     try:
@@ -130,12 +257,12 @@ def startup_restore_from_s3() -> None:
 
 
 def _startup_restore_from_s3_inner() -> None:
-    client = _get_s3_client()
-    if not client:
-        logger.info("[STORAGE] AWS not configured — skipping startup restore from S3")
+    backend = storage_backend()
+    if backend is None:
+        logger.info("[STORAGE] No durable backend configured (AWS_* or HF_TOKEN+HF_DATA_REPO) — skipping startup restore")
         return
 
-    logger.info("[STORAGE] Checking S3 for data to restore...")
+    logger.info("[STORAGE] Checking %s for data to restore...", backend.upper())
     restored = 0
 
     # 1. FAISS vector index — only pulled when the vector store feature is enabled.

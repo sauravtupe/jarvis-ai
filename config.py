@@ -159,6 +159,17 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "jarvis-data")
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 
+# HuggingFace Dataset persistence (free alternative to S3).
+# When AWS is NOT configured, the app backs up lectures/quizzes/uploads/chats to a
+# private HuggingFace Dataset repo so the data survives Space rebuilds & restarts.
+# HF_TOKEN  — a HuggingFace token with WRITE access (Settings → Access Tokens).
+#             HF Spaces sometimes inject HF_TOKEN automatically; HUGGINGFACE_TOKEN
+#             is accepted as an alias.
+# HF_DATA_REPO — the dataset repo id, e.g. "your-username/jarvis-data". The repo is
+#                created automatically (private) on first write if it doesn't exist.
+HF_TOKEN = (os.getenv("HF_TOKEN", "") or os.getenv("HUGGINGFACE_TOKEN", "")).strip()
+HF_DATA_REPO = os.getenv("HF_DATA_REPO", "").strip()
+
 # OpenAI (Feature 4 — Classroom Attention AI)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 

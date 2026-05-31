@@ -197,11 +197,21 @@ ASSISTANT_NAME=Jarvis
 JARVIS_USER_TITLE=Sir
 JARVIS_OWNER_NAME=YourName
 
-# TO ADD (Feature 3)
+# TO ADD (Feature 3) — durable storage. Use EITHER AWS S3 OR a free HuggingFace Dataset.
+# Without one of these, all saved data (lectures, practice, notes, chats) is lost on
+# HF Space rebuild because the container disk is ephemeral.
+
+# Option A — AWS S3
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
-AWS_S3_BUCKET=jarvis-screenshots
+AWS_S3_BUCKET=jarvis-data
 AWS_REGION=ap-south-1
+
+# Option B — FREE HuggingFace Dataset (used automatically when AWS is unset).
+# Persists lectures/quizzes/uploads/chats to a private HF Dataset repo so they
+# survive rebuilds. The repo is auto-created (private) on first write.
+HF_TOKEN=                 # HF token with WRITE access (Settings → Access Tokens)
+HF_DATA_REPO=            # e.g. your-username/jarvis-data
 
 # TO ADD (Feature 4)
 OPENAI_API_KEY=           # GPT-4o classroom vision only
