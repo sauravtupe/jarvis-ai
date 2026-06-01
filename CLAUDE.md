@@ -165,7 +165,6 @@ TTS is generated via `edge-tts` and returned as base64 audio chunks over SSE alo
 | GET | `/chat/history/{session_id}` | Session chat history |
 | GET | `/tasks/{task_id}` | Background task status |
 | POST | `/tts` | Text-to-speech MP3 stream |
-| POST | `/stt` | Speech-to-text — browser sends a VAD-gated, cleaned audio clip; Groq Whisper (`GROQ_STT_MODEL`) transcribes it. 429 when all Groq keys are rate-limited (frontend then falls back to Web Speech) |
 | POST | `/quiz/generate` | YouTube → MCQ quiz (10 questions, matches transcript language) |
 | POST | `/quiz/summary` | YouTube → structured summary |
 | POST | `/admin/login` | *(Feature 8)* Verify `ADMIN_TOKEN`, returns `{ok}` or 401 |
@@ -189,7 +188,6 @@ TTS is generated via `edge-tts` and returned as base64 audio chunks over SSE alo
 GROQ_API_KEY=
 GROQ_API_KEY_2=
 GROQ_MODEL=llama-3.3-70b-versatile
-GROQ_STT_MODEL=whisper-large-v3-turbo   # live mic speech-to-text (cheap, multilingual); reuses GROQ_API_KEY rotation
 GROQ_BRAIN_MODEL=llama-3.1-8b-instant
 GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
 TAVILY_API_KEY=

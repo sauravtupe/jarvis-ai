@@ -14,27 +14,6 @@ const SPEECH_SEND_DELAY_MS = 1000;   // silence after a final command before sen
 const SPEECH_RESTART_DELAY_MS = 250; // gap between listening sessions; kept short so "Jarvis" isn't missed in dead air (was 700)
 let speechSendTimeout = null;
 let pendingSendTranscript = null;
-
-// ─── High-accuracy voice: VAD-gated capture → Groq Whisper (/stt) ───────────
-// When enabled, the mic audio is cleaned (noise-suppression + echo-cancellation
-// + auto-gain + a gain boost) in the browser, a local voice-activity detector
-// grabs just the spoken segments, and each segment is transcribed by Groq
-// Whisper. On rate-limit/error we fall back to the browser's Web Speech engine
-// so voice never breaks. The engine stays allocated across utterances.
-let _voiceMode = 'whisper';            // 'whisper' | 'webspeech' (decided in startListening)
-let _whisperListening = false;         // VAD is armed (acting on audio)
-let _whisperCtx = null, _whisperStream = null, _whisperProcessor = null;
-let _whisperSource = null, _whisperGain = null, _whisperSilent = null;
-let _whisperSampleRate = 16000;
-let _sttBusy = false;                  // a /stt request is in flight (don't overlap)
-const WHISPER_GAIN = 1.4;              // extra sensitivity boost (helps soft/distant)
-const VAD_END_SILENCE_MS = 700;        // trailing silence that ends a segment
-const VAD_MAX_SEG_MS = 10000;          // hard cap on a single utterance
-const VAD_MIN_SEG_MS = 250;            // ignore blips shorter than this
-const VAD_PREROLL_FRAMES = 4;          // ~300ms kept before speech so onsets aren't clipped
-let _vadSpeaking = false, _vadSilenceMs = 0, _vadSegMs = 0, _vadNoiseFloor = 0.01;
-let _vadSegFrames = [];
-const _vadPreroll = [];
 let safariVoiceHintShown = false;
 let orb = null;
 let pendingAttachment = null; // { upload_id, filename, content_type, extracted_text }
@@ -244,8 +223,6 @@ function _disableMic() {
     _clearWakeActiveTimer();
     _setMicState(MIC_STATE_OFF);
     autoListenMode = false;
-    _whisperListening = false;
-    _stopWhisperEngine();
     if (isListening) stopListening();
 }
 
@@ -264,7 +241,7 @@ function _maybeStartWakeWord() {
 
 let _ttsAudio = null;   // dedicated pre-unlocked element for inline TTS playback
 const SETTINGS_KEY = 'jarvis_settings';
-const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true, wakeWord: true, highAccuracyVoice: true };
+const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true, wakeWord: true };
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
 let PRE_STARTER_CACHE = {};
 let settings = { ...DEFAULT_SETTINGS };
@@ -312,7 +289,6 @@ const toggleAutoSearch    = $('toggle-auto-search');
 const toggleThinkingSounds = $('toggle-thinking-sounds');
 const toggleVoiceInterrupt = $('toggle-voice-interrupt');
 const toggleWakeWord       = $('toggle-wake-word');
-const toggleHighAccuracyVoice = $('toggle-high-accuracy-voice');
 const toastContainer     = $('toast-container');
 const uploadBtn          = $('upload-btn');
 const uploadInput        = $('upload-input');
@@ -859,7 +835,6 @@ function loadSettings() {
         if (toggleThinkingSounds) toggleThinkingSounds.checked = settings.thinkingSounds;
         if (toggleVoiceInterrupt) toggleVoiceInterrupt.checked = settings.voiceInterrupt;
         if (toggleWakeWord) toggleWakeWord.checked = settings.wakeWord;
-        if (toggleHighAccuracyVoice) toggleHighAccuracyVoice.checked = settings.highAccuracyVoice;
     } catch (_) {}
 }
 
@@ -1071,203 +1046,6 @@ function initSpeech() {
     };
 }
 
-// ─── High-accuracy voice engine (cleaned mic → local VAD → Groq Whisper) ────
-function _whisperSupported() {
-    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia &&
-        (window.AudioContext || window.webkitAudioContext));
-}
-
-function _resetWhisperVad() {
-    _vadSpeaking = false; _vadSilenceMs = 0; _vadSegMs = 0;
-    _vadSegFrames = []; _vadPreroll.length = 0;
-}
-
-async function _ensureWhisperEngine() {
-    if (_whisperCtx) return;
-    const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
-    });
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new Ctx();
-    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch (_) {} }
-    const source = ctx.createMediaStreamSource(stream);
-    const gain = ctx.createGain(); gain.gain.value = WHISPER_GAIN;
-    const processor = ctx.createScriptProcessor(4096, 1, 1);
-    // Mute mic→speakers (gain 0) so there's no echo, but keep the node connected
-    // to the destination so onaudioprocess keeps firing.
-    const silent = ctx.createGain(); silent.gain.value = 0;
-    source.connect(gain); gain.connect(processor); processor.connect(silent); silent.connect(ctx.destination);
-    processor.onaudioprocess = _whisperOnAudio;
-    _whisperCtx = ctx; _whisperStream = stream; _whisperProcessor = processor;
-    _whisperSource = source; _whisperGain = gain; _whisperSilent = silent;
-    _whisperSampleRate = ctx.sampleRate || 16000;
-    _resetWhisperVad();
-}
-
-function _stopWhisperEngine() {
-    try { if (_whisperProcessor) _whisperProcessor.onaudioprocess = null; } catch (_) {}
-    try { if (_whisperProcessor) _whisperProcessor.disconnect(); } catch (_) {}
-    try { if (_whisperSource) _whisperSource.disconnect(); } catch (_) {}
-    try { if (_whisperGain) _whisperGain.disconnect(); } catch (_) {}
-    try { if (_whisperSilent) _whisperSilent.disconnect(); } catch (_) {}
-    try { if (_whisperStream) _whisperStream.getTracks().forEach(t => t.stop()); } catch (_) {}
-    try { if (_whisperCtx) _whisperCtx.close(); } catch (_) {}
-    _whisperCtx = _whisperStream = _whisperProcessor = _whisperSource = _whisperGain = _whisperSilent = null;
-    _resetWhisperVad();
-}
-
-function _whisperOnAudio(e) {
-    // Don't capture while Jarvis is speaking, a video is playing, a response is
-    // streaming, the VAD is disarmed, or a /stt call is still in flight.
-    if (!_whisperListening || _jarvisSpeaking || _videoWatchMode || isStreaming || _sttBusy) {
-        if (_vadSpeaking) _resetWhisperVad();
-        return;
-    }
-    const input = e.inputBuffer.getChannelData(0);
-    let sum = 0;
-    for (let i = 0; i < input.length; i++) { const s = input[i]; sum += s * s; }
-    const rms = Math.sqrt(sum / input.length);
-    const frameMs = (input.length / _whisperSampleRate) * 1000;
-    if (!_vadSpeaking) _vadNoiseFloor = _vadNoiseFloor * 0.95 + rms * 0.05;   // track quiet baseline
-    const startThresh = Math.max(0.012, _vadNoiseFloor * 2.5 + 0.004);
-    const endThresh = Math.max(0.008, _vadNoiseFloor * 1.8 + 0.002);
-    const frame = new Float32Array(input);   // copy — the engine reuses `input`
-    if (!_vadSpeaking) {
-        _vadPreroll.push(frame);
-        if (_vadPreroll.length > VAD_PREROLL_FRAMES) _vadPreroll.shift();
-        if (rms > startThresh) {
-            _vadSpeaking = true;
-            _vadSegFrames = _vadPreroll.slice();
-            _vadSegMs = _vadPreroll.length * frameMs;
-            _vadSilenceMs = 0;
-            _vadPreroll.length = 0;
-        }
-    } else {
-        _vadSegFrames.push(frame);
-        _vadSegMs += frameMs;
-        if (rms < endThresh) {
-            _vadSilenceMs += frameMs;
-            if (_vadSilenceMs >= VAD_END_SILENCE_MS) _finalizeWhisperSegment();
-        } else {
-            _vadSilenceMs = 0;
-        }
-        if (_vadSegMs >= VAD_MAX_SEG_MS) _finalizeWhisperSegment();
-    }
-}
-
-function _finalizeWhisperSegment() {
-    const frames = _vadSegFrames;
-    const segMs = _vadSegMs;
-    _resetWhisperVad();
-    if (segMs < VAD_MIN_SEG_MS) return;
-    let len = 0;
-    for (const f of frames) len += f.length;
-    if (!len) return;
-    const pcm = new Float32Array(len);
-    let o = 0;
-    for (const f of frames) { pcm.set(f, o); o += f.length; }
-    const wav = _encodeWav(pcm, _whisperSampleRate);
-    _sttBusy = true;
-    if (speechWidgetText) speechWidgetText.textContent = '…';
-    _sttTranscribe(wav)
-        .then(text => { if (text) _onFinalVoiceText(text); })
-        .catch(() => {})
-        .finally(() => { _sttBusy = false; });
-}
-
-function _encodeWav(samples, sampleRate) {
-    const len = samples.length;
-    const buffer = new ArrayBuffer(44 + len * 2);
-    const view = new DataView(buffer);
-    const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
-    writeStr(0, 'RIFF'); view.setUint32(4, 36 + len * 2, true); writeStr(8, 'WAVE');
-    writeStr(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-    writeStr(36, 'data'); view.setUint32(40, len * 2, true);
-    let off = 44;
-    for (let i = 0; i < len; i++) {
-        let s = Math.max(-1, Math.min(1, samples[i]));
-        s = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        view.setInt16(off, s, true); off += 2;
-    }
-    return new Blob([view], { type: 'audio/wav' });
-}
-
-async function _sttTranscribe(blob) {
-    const fd = new FormData();
-    fd.append('file', blob, 'cmd.wav');
-    let resp;
-    try {
-        resp = await fetch(`${API}/stt`, { method: 'POST', headers: { ...getAuthHeaders() }, body: fd });
-    } catch (e) {
-        _enterWebSpeechFallback();
-        throw e;
-    }
-    // 429 = all Groq keys rate-limited; 503 = no key configured. Both → fall back.
-    if (resp.status === 429 || resp.status === 503) {
-        _enterWebSpeechFallback();
-        throw new Error('stt unavailable ' + resp.status);
-    }
-    if (!resp.ok) throw new Error('stt http ' + resp.status);
-    const data = await resp.json().catch(() => null);
-    return (data && data.text ? String(data.text) : '').trim();
-}
-
-// Shared dispatcher for a complete recognized utterance (used by the Whisper
-// engine). Mirrors the Web Speech final-result handling: wake gate in PASSIVE,
-// command in ACTIVE.
-function _onFinalVoiceText(text) {
-    text = (text || '').trim();
-    if (!text || text.length < 2) return;
-    if (_jarvisSpeaking || _videoWatchMode || isStreaming) return;
-    if (_micState === MIC_STATE_PASSIVE) {
-        const wake = _matchWakeWord(text);
-        if (!wake) { if (speechWidgetText) speechWidgetText.textContent = ''; return; }
-        if (speechWidget) speechWidget.classList.add('visible');
-        if (wake.remaining && wake.remaining.length >= 2) {
-            if (speechWidgetText) speechWidgetText.textContent = wake.remaining;
-            _clearWakeActiveTimer();
-            sendMessage(wake.remaining);
-        } else {
-            if (speechWidgetText) speechWidgetText.textContent = 'Listening, Sir…';
-            _startActiveWindow();
-        }
-        return;
-    }
-    // ACTIVE (woken, or manual mic): treat the utterance as a command.
-    if (VOICE_STOP_COMMANDS.test(text)) {
-        if (ttsPlayer) { ttsPlayer.stop(); ttsPlayer.stopped = false; }
-        if (speechWidget) speechWidget.classList.remove('visible');
-        if (speechWidgetText) speechWidgetText.textContent = '';
-        _clearWakeActiveTimer();
-        if (settings.wakeWord) _setMicState(MIC_STATE_PASSIVE);
-        return;
-    }
-    let cmd = text;
-    const ws = _matchWakeWord(cmd);
-    if (ws && ws.remaining && ws.remaining.length >= 2) cmd = ws.remaining;
-    if (speechWidgetText) speechWidgetText.textContent = cmd;
-    _clearWakeActiveTimer();
-    if (settings.wakeWord) _setMicState(MIC_STATE_PASSIVE);   // back to wake-gating after this command
-    sendMessage(cmd);
-}
-
-// Whisper unavailable (rate-limited / errored) → switch to the browser engine
-// for the rest of the session. Re-enable by reloading or toggling the setting.
-function _enterWebSpeechFallback() {
-    if (_voiceMode === 'webspeech') return;
-    const wasArmed = _whisperListening;
-    _stopWhisperEngine();
-    _whisperListening = false;
-    _sttBusy = false;
-    _voiceMode = 'webspeech';
-    isListening = false;
-    if (typeof showToast === 'function') showToast('High-accuracy voice unavailable — using standard recognition.', 3500);
-    if (wasArmed && autoListenMode && !isStreaming && !_jarvisSpeaking && !_videoWatchMode) {
-        setTimeout(() => { if (_voiceMode === 'webspeech' && !isListening) startListening(); }, 200);
-    }
-}
-
 function startListening() {
     if (!recognition || isStreaming || isListening) return;
     // Refuse to start the mic while Jarvis is speaking (or has audio queued).
@@ -1277,20 +1055,6 @@ function startListening() {
     const ttsActive = _jarvisSpeaking ||
         (ttsPlayer && (ttsPlayer.playing || ttsPlayer.queue.length > 0));
     if (ttsActive) return;
-    // High-accuracy path: run the cleaned-audio VAD→Whisper engine instead of the
-    // browser recognizer. The engine stays allocated across utterances; here we
-    // just arm it (lazily creating it on first use).
-    if (settings.highAccuracyVoice && _whisperSupported()) {
-        _voiceMode = 'whisper';
-        isListening = true;
-        _whisperListening = true;
-        if (micBtn) micBtn.classList.add('listening');
-        if (speechWidget) speechWidget.classList.add('visible');
-        if (speechWidgetText) speechWidgetText.textContent = '';
-        _ensureWhisperEngine().catch(() => _enterWebSpeechFallback());
-        return;
-    }
-    _voiceMode = 'webspeech';
     if (isSafariOrIOS() && !safariVoiceHintShown) {
         showToast('Voice works best in Chrome. Safari has limited support.');
         safariVoiceHintShown = true;
@@ -1325,9 +1089,6 @@ function stopListening() {
     if (micBtn) micBtn.classList.remove('listening');
     if (speechWidget) speechWidget.classList.remove('visible');
     if (speechWidgetText) speechWidgetText.textContent = '';
-    // Whisper engine stays allocated between utterances — just disarm the VAD so
-    // it stops acting on audio. Full teardown happens in _disableMic.
-    if (_voiceMode === 'whisper') { _whisperListening = false; return; }
     try { recognition.stop(); } catch (_) {}
 }
 
@@ -2031,25 +1792,6 @@ function bindEvents() {
             } else {
                 _disableMic();
                 showToast('Wake word disabled. Click the mic to talk.', 3500);
-            }
-        });
-    }
-    if (toggleHighAccuracyVoice) {
-        toggleHighAccuracyVoice.addEventListener('change', () => {
-            settings.highAccuracyVoice = toggleHighAccuracyVoice.checked;
-            saveSettings();
-            // Apply live: tear down whatever engine is currently running (in its
-            // current mode), then re-arm on the newly chosen engine if the mic was on.
-            const wasListening = isListening || _whisperListening;
-            if (_voiceMode === 'whisper') { _whisperListening = false; _stopWhisperEngine(); }
-            else { try { if (recognition) recognition.stop(); } catch (_) {} }
-            isListening = false;
-            _voiceMode = (settings.highAccuracyVoice && _whisperSupported()) ? 'whisper' : 'webspeech';
-            showToast(settings.highAccuracyVoice
-                ? 'High-accuracy voice on (Whisper).'
-                : 'High-accuracy voice off — using standard recognition.', 3000);
-            if (wasListening && autoListenMode && !isStreaming && !_jarvisSpeaking && !_videoWatchMode) {
-                setTimeout(() => { if (!isListening) startListening(); }, 250);
             }
         });
     }

@@ -227,9 +227,6 @@ def _load_groq_api_keys() -> list:
 GROQ_API_KEYS = _load_groq_api_keys()
 GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else ""
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-# Speech-to-text (live mic → text). Whisper turbo: cheapest ($0.04/hr audio),
-# multilingual (Hindi + English). Reuses GROQ_API_KEYS + rotation.
-GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 GROQ_BRAIN_MODEL = os.getenv("GROQ_BRAIN_MODEL", "llama-3.1-8b-instant")
 INTENT_CLASSIFY_MODEL = os.getenv("INTENT_CLASSIFY_MODEL", "llama-3.1-8b-instant")
