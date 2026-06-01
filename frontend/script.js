@@ -10,8 +10,8 @@ let camStream = null;
 let autoListenMode = false;
 const SPEECH_ERROR_MAX_RETRIES = 15;
 let speechErrorRetryCount = 0;
-const SPEECH_SEND_DELAY_MS = 1800;
-const SPEECH_RESTART_DELAY_MS = 700;
+const SPEECH_SEND_DELAY_MS = 1000;   // silence after a final command before sending (was 1800 — felt sluggish)
+const SPEECH_RESTART_DELAY_MS = 250; // gap between listening sessions; kept short so "Jarvis" isn't missed in dead air (was 700)
 let speechSendTimeout = null;
 let pendingSendTranscript = null;
 let safariVoiceHintShown = false;
@@ -126,9 +126,11 @@ const MIC_STATE_BLOCKED = 'blocked';
 let _micState = MIC_STATE_OFF;
 let _wakeActiveTimer = null;
 const WAKE_ACTIVE_WINDOW_MS = 10000;
-// Substring matcher for the wake word. Includes common SpeechRecognition
-// misreads ("javis", "jarwis", "service") so the user doesn't have to enunciate.
-const _WAKE_WORD_RE = /\b(jarvis|javis|jarwis|service)\b/i;
+// Substring matcher for the wake word. The SpeechRecognition engine mis-hears
+// "Jarvis" constantly, so we accept a broad set of look-alikes/sound-alikes —
+// recall matters more than precision here (a stray match just opens the 10s
+// command window). Add more variants here if a real misread keeps slipping through.
+const _WAKE_WORD_RE = /\b(jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b/i;
 
 function _matchWakeWord(text) {
     if (!text) return null;
@@ -878,7 +880,7 @@ function initSpeech() {
     const safariMode = isSafariOrIOS();
     recognition.continuous = true;
     recognition.interimResults = !safariMode;
-    recognition.maxAlternatives = 3;
+    recognition.maxAlternatives = 5;  // more guesses for the wake-word scanner to find "Jarvis" in
     recognition.lang = 'en-IN';
     recognition.onresult = e => {
         if (!e.results || e.results.length === 0) return;
@@ -899,19 +901,32 @@ function initSpeech() {
             return;
         }
         const last = e.results[e.results.length - 1];
-        // Pick the longest alternative transcript
-        let transcript = '';
+        // Collect every alternative the engine returned. The wake word often hides
+        // in a shorter, lower-ranked guess, so we scan them all (below) instead of
+        // trusting only the top/longest one.
+        const alts = [];
         for (let i = 0; i < (last ? last.length : 0); i++) {
-            const alt = last[i] ? last[i].transcript.trim() : '';
-            if (alt.length > transcript.length) transcript = alt;
+            const a = last[i] ? last[i].transcript.trim() : '';
+            if (a) alts.push(a);
         }
+        // Longest alternative = the command transcript (most complete phrasing).
+        let transcript = '';
+        for (const a of alts) { if (a.length > transcript.length) transcript = a; }
         const isFinal = last && last.isFinal;
 
         // === Wake-word PASSIVE mode ===
         // Only act on results that contain "Jarvis". Everything else is silent
         // background — the speech widget stays empty so it doesn't feel "always on".
         if (_micState === MIC_STATE_PASSIVE) {
-            const wake = _matchWakeWord(transcript);
+            // Scan ALL alternatives — checking only the longest one silently drops
+            // the wake word when the engine buries "Jarvis" in a shorter guess.
+            // Among the guesses that DO contain it, keep the one carrying the most
+            // command text, so "Jarvis what's the weather" beats a bare "Jarvis".
+            let wake = null;
+            for (const a of alts) {
+                const w = _matchWakeWord(a);
+                if (w && (!wake || w.remaining.length > wake.remaining.length)) wake = w;
+            }
             if (!wake) {
                 if (speechWidgetText) speechWidgetText.textContent = '';
                 return;
