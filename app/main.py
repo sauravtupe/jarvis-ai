@@ -1201,6 +1201,39 @@ async def generate_summary(request: SummaryRequest):
     return SummaryResponse(summary=summary_text, video_id=request.video_id)
 
 
+@app.post("/stt")
+async def speech_to_text(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    user_id: str = Depends(get_optional_user),
+):
+    """Transcribe a short spoken-command clip via Groq Whisper.
+
+    The browser cleans the mic audio and gates it with a local VAD, so this runs
+    only for real speech. On rate-limit the client falls back to Web Speech.
+    """
+    from app.services import stt_service
+
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(status_code=400, detail="empty audio")
+    if len(audio) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="audio too large")
+    try:
+        result = stt_service.transcribe(
+            audio, filename=file.filename or "audio.wav", language=language
+        )
+    except stt_service.STTQuotaError:
+        # All Groq keys rate-limited — client switches to its Web Speech fallback.
+        raise HTTPException(status_code=429, detail="speech-to-text rate-limited")
+    except stt_service.STTUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[STT] transcription error: %s", e)
+        raise HTTPException(status_code=502, detail="speech-to-text failed")
+    return {"text": result.get("text", ""), "language": result.get("language")}
+
+
 @app.get("/practice/list/{class_name}", response_model=PracticeListResponse)
 async def list_practice_pdfs(class_name: str):
     from app.services.practice_service import list_pdfs_for_class
