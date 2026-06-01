@@ -11,7 +11,7 @@ let autoListenMode = false;
 const SPEECH_ERROR_MAX_RETRIES = 15;
 let speechErrorRetryCount = 0;
 const SPEECH_SEND_DELAY_MS = 1000;   // silence after a final command before sending (was 1800 — felt sluggish)
-const SPEECH_RESTART_DELAY_MS = 250; // gap between listening sessions; kept short so "Jarvis" isn't missed in dead air (was 700)
+const SPEECH_RESTART_DELAY_MS = 150; // gap between listening sessions; kept tiny + a watchdog re-arms a dead recognizer so "Jarvis" isn't missed (was 700→250)
 let speechSendTimeout = null;
 let pendingSendTranscript = null;
 let safariVoiceHintShown = false;
@@ -125,6 +125,7 @@ const MIC_STATE_ACTIVE = 'active';
 const MIC_STATE_BLOCKED = 'blocked';
 let _micState = MIC_STATE_OFF;
 let _wakeActiveTimer = null;
+let _wakeWatchdog = null;   // keeps Web Speech alive so the wake word isn't missed (see _startWakeWatchdog)
 const WAKE_ACTIVE_WINDOW_MS = 10000;
 // Substring matcher for the wake word. The SpeechRecognition engine mis-hears
 // "Jarvis" constantly, so we accept a broad set of look-alikes/sound-alikes —
@@ -206,6 +207,7 @@ function _enterPassiveListening() {
     }
     _setMicState(MIC_STATE_PASSIVE);
     autoListenMode = true;
+    _startWakeWatchdog();
     if (!isListening) startListening();
 }
 
@@ -215,15 +217,41 @@ function _enterActiveListening() {
         return;
     }
     autoListenMode = true;
+    _startWakeWatchdog();
     if (!isListening) startListening();
     _startActiveWindow();
 }
 
 function _disableMic() {
     _clearWakeActiveTimer();
+    _stopWakeWatchdog();
     _setMicState(MIC_STATE_OFF);
     autoListenMode = false;
     if (isListening) stopListening();
+}
+
+// ─── Wake-word watchdog ─────────────────────────────────────────────────────
+// Chrome's SpeechRecognition stops on its own sometimes — after a no-speech
+// timeout, after ~60s, when the tab backgrounds, or when a restart is dropped in
+// the tiny gap between sessions. When that happens nothing is actually listening,
+// so the user has to say "Jarvis" several times. This watchdog notices a dead
+// recognizer (we think we're listening but aren't) and re-arms it within ~2s, so
+// passive wake-word listening stays effectively continuous.
+function _startWakeWatchdog() {
+    if (_wakeWatchdog) return;
+    _wakeWatchdog = setInterval(() => {
+        if (!recognition || !autoListenMode) return;
+        if (isStreaming || _jarvisSpeaking || _videoWatchMode) return;
+        if (isListening) return;                                       // already running
+        if (speechErrorRetryCount >= SPEECH_ERROR_MAX_RETRIES) return; // gave up (e.g. mic permission denied)
+        // Should be listening but isn't — revive it.
+        if (settings && settings.wakeWord && _micState !== MIC_STATE_ACTIVE) _enterPassiveListening();
+        else startListening();
+    }, 2000);
+}
+
+function _stopWakeWatchdog() {
+    if (_wakeWatchdog) { clearInterval(_wakeWatchdog); _wakeWatchdog = null; }
 }
 
 // Called once at end of init(). The mic needs a user gesture to start, so we
