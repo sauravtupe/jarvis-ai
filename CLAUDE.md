@@ -226,6 +226,15 @@ GEMINI_API_KEY=           # Google AI Studio key. Free tier: 1,500 requests/day 
                           # Get free key at https://aistudio.google.com/apikey
                           # If unset, AI practical generation falls back to Groq Llama 3.3 70B.
 
+# TO ADD (Image generation on cloud hosts) — REQUIRED for image gen to work on the HF Space.
+POLLINATIONS_TOKEN=       # Free token from https://auth.pollinations.ai . Anonymous Pollinations
+                          # requests from a shared cloud/datacenter IP (the HF Space) are heavily
+                          # rate-limited → "no image" failures, even though the same request works
+                          # from a home IP. The token lifts the backend onto the free "Seed" tier.
+                          # Sent as `Authorization: Bearer <token>`. If unset, image gen still works
+                          # locally but will likely be throttled on the HF Space.
+POLLINATIONS_REFERRER=    # Optional. App identifier sent on every request. Default: jarvis-ai.hf.space
+
 # ADD LAST (Feature 7 — auth)
 SUPABASE_URL=
 SUPABASE_ANON_KEY=

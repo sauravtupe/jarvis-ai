@@ -102,7 +102,7 @@ class TaskManager:
                         self._tasks[task_id].image_bytes = image_bytes
                 
                 else:
-                    raise RuntimeError("Image generation returned no result. Check API key or content policy.")
+                    raise RuntimeError("Image generation returned no result.")
 
             elif intent_type == INTENT_CONTENT:
                 text = self.task_executor._do_content(payload, chat_history)

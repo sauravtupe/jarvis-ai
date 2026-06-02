@@ -1040,7 +1040,10 @@ async def get_task_image(task_id: str):
     if entry.status != "completed" or not entry.image_bytes:
         raise HTTPException(status_code=404, detail="Image not ready")
 
-    return Response(content=entry.image_bytes, media_type="image/png")
+    # Pollinations returns JPEG; sniff the magic bytes so the Content-Type is correct.
+    # A wrong type can make some browsers download the file instead of rendering it inline.
+    media = "image/png" if entry.image_bytes[:4] == b"\x89PNG" else "image/jpeg"
+    return Response(content=entry.image_bytes, media_type=media, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/chat/history/{session_id}")

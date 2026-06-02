@@ -38,6 +38,15 @@ PRACTICAL_AI_CACHE_PREFIX = "practicals_ai_cache"  # S3 key prefix
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_PRACTICAL_MODEL = os.getenv("GEMINI_PRACTICAL_MODEL", "gemini-2.5-flash")
 
+# Pollinations image generation (task_executor). Anonymous requests from a shared
+# cloud/datacenter IP (like the HF Space) are heavily rate-limited → "no image"
+# failures, even though the SAME request returns a valid image from a home IP. A
+# free token (register at https://auth.pollinations.ai) moves the backend onto the
+# "Seed" tier and fixes this; it is sent as `Authorization: Bearer <token>`.
+# REFERRER is a softer signal sent on every request and helps identify the app.
+POLLINATIONS_TOKEN = os.getenv("POLLINATIONS_TOKEN", "").strip()
+POLLINATIONS_REFERRER = os.getenv("POLLINATIONS_REFERRER", "jarvis-ai.hf.space").strip()
+
 # ─── Grade → age-band mapping (Feature 9 age-aware practice) ─────────────────
 # Single source of truth for how generated practice is leveled. Reused by the
 # practice prompt builder AND the server-side validator (defense in depth — the

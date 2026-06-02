@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import quote, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
-from config import TASK_EXECUTION_TIMEOUT
+from config import TASK_EXECUTION_TIMEOUT, POLLINATIONS_TOKEN, POLLINATIONS_REFERRER
 from app.services.decision_types import (
     INTENT_OPEN, INTENT_PLAY, INTENT_CAMERA,
     INTENT_OPEN_WEBCAM, INTENT_CLOSE_WEBCAM,
@@ -236,50 +236,81 @@ class TaskExecutor:
         return f"https://www.youtube.com/results?search_query={quote(query, safe='')}"
 
 
-    def _do_generate_image(self, payload: dict) -> Optional[tuple]:
-    
+    def _do_generate_image(self, payload: dict) -> tuple:
+
         prompt = (payload.get("prompt", payload.get("message", "")) or "").strip()
 
         if len(prompt) < 3:
             logger.warning("[TASK] Image prompt too short (< 3 chars)")
-            return None
+            raise ValueError("Tell me what to draw — the image prompt was empty.")
 
         prompt = prompt[:4000]
         t0 = time.perf_counter()
 
+        # Raises a descriptive error on failure (the real cause reaches the user).
         result = self._generate_pollinations(prompt)
+        logger.info("[TASK] Pollinations image downloaded in %.2fs", time.perf_counter() - t0)
+        return result
 
-        if result:
-            logger.info("[TASK] Pollinations image downloaded in %.2fs", time.perf_counter() - t0)
-            return result
 
-        logger.warning("[TASK] Image generation failed")
-        return None
-    
+    def _generate_pollinations(self, prompt: str) -> tuple:
+        """Download the generated image and return (url, bytes).
 
-    def _generate_pollinations(self, prompt: str) -> Optional[tuple]:
-    #"""Download the generated image and return (url, bytes), or None on failure."""
+        Raises RuntimeError on persistent failure so the REAL reason (e.g. HTTP 429
+        rate-limit from a shared cloud IP) reaches the user instead of a misleading
+        generic message. A free POLLINATIONS_TOKEN (auth.pollinations.ai) lifts the
+        request off the throttled anonymous tier — this is what makes image generation
+        work from the HF Space's datacenter IP.
+        """
         import httpx
         encoded_prompt = quote(prompt, safe='')
-        api_url = (
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-            f"?model=flux&width=1024&height=1024&nologo=true&private=true&enhance=true&safe=false"
-        )
-        logger.info("[TASK] Fetching Pollinations image: %s", api_url[:120])
+        params = "model=flux&width=1024&height=1024&nologo=true&private=true&enhance=true&safe=false"
+        if POLLINATIONS_REFERRER:
+            params += f"&referrer={quote(POLLINATIONS_REFERRER, safe='')}"
+        api_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?{params}"
+
+        headers = {"User-Agent": "Jarvis-AI/1.0"}
+        if POLLINATIONS_TOKEN:
+            headers["Authorization"] = f"Bearer {POLLINATIONS_TOKEN}"
+
+        logger.info("[TASK] Fetching Pollinations image (auth=%s): %s",
+                    "yes" if POLLINATIONS_TOKEN else "no", api_url[:120])
+
+        last_status = None
+        last_detail = ""
         for attempt in range(3):
             try:
                 with httpx.Client(timeout=60, follow_redirects=True) as client:
-                    resp = client.get(api_url)
+                    resp = client.get(api_url, headers=headers)
+                last_status = resp.status_code
                 if resp.status_code == 200 and resp.content:
                     content_type = resp.headers.get("content-type", "")
                     if "image" in content_type or len(resp.content) > 1000:
-                        logger.info("[TASK] Pollinations image fetched (%d bytes)", len(resp.content))
+                        logger.info("[TASK] Pollinations image fetched (%d bytes, %s)",
+                                    len(resp.content), content_type or "unknown")
                         return (api_url, resp.content)
-                logger.warning("[TASK] Pollinations attempt %d: status=%d", attempt + 1, resp.status_code)
+                    last_detail = f"non-image response (content-type={content_type!r}, {len(resp.content)} bytes)"
+                else:
+                    last_detail = (resp.text or "")[:200]
+                logger.warning("[TASK] Pollinations attempt %d: status=%s %s",
+                               attempt + 1, resp.status_code, last_detail)
+                # Rate-limited → back off longer (Seed tier allows ~1 request / 5s).
+                if resp.status_code == 429:
+                    time.sleep(6)
+                    continue
             except Exception as e:
+                last_detail = str(e)
                 logger.warning("[TASK] Pollinations attempt %d failed: %s", attempt + 1, e)
             time.sleep(2)
-        return None
+
+        # All attempts exhausted — raise with the real cause so it's visible, not guessed.
+        if last_status == 429 or last_status is None:
+            raise RuntimeError(
+                "Image service is rate-limiting this server"
+                + (f" (HTTP {last_status})" if last_status else " (no response)")
+                + ". Set a free POLLINATIONS_TOKEN (auth.pollinations.ai) as an HF Space secret to fix this."
+            )
+        raise RuntimeError(f"Image service error (HTTP {last_status}): {last_detail or 'no image returned'}")
 
     def _do_content(self, payload: dict, chat_history: Optional[List[tuple]] = None) -> Optional[str]:
         prompt = (payload.get("prompt", payload.get("message", "")) or "").strip()
