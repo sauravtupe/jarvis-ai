@@ -168,6 +168,9 @@ async def lifespan(app: FastAPI):
     logger.info("[CONFIG] Chunk size: %d | Overlap: %d | Max history turns: %d",
         CHUNK_SIZE, CHUNK_OVERLAP, MAX_CHAT_HISTORY_TURNS)
 
+    # Defined up here so the shutdown block can safely reference it even if startup
+    # fails before the scheduler is created.
+    scheduler = None
 
     try:
         # Generate starter audio clips if missing — runs as background task so it never blocks startup
@@ -259,16 +262,20 @@ async def lifespan(app: FastAPI):
         logger.info("  - Vision (Groq): Ready")
         logger.info("  - Chat Service: Ready")
 
-        # TTS connectivity test — verifies OpenAI key works at startup
-        import os as _os_startup
-        if not _os_startup.environ.get("OPENAI_API_KEY", "").strip():
-            logger.error("  - TTS: FAILED — OPENAI_API_KEY not set in environment / HF Secrets")
-        else:
+        # TTS connectivity self-test — purely diagnostic. Runs in the BACKGROUND so a
+        # slow or unreachable TTS provider can never delay startup. (It used to block
+        # up to 30s before the app accepted traffic, which made every request 500
+        # during a restart.) The app serves immediately; this only logs whether
+        # TTS works once it completes.
+        async def _bg_tts_selftest():
+            import os as _os_startup
+            if not _os_startup.environ.get("OPENAI_API_KEY", "").strip():
+                logger.error("  - TTS: FAILED — OPENAI_API_KEY not set in environment / HF Secrets")
+                return
             try:
-                import os as _os_az
-                _azure_ready = bool(_os_az.environ.get("AZURE_SPEECH_KEY") and _os_az.environ.get("AZURE_SPEECH_REGION"))
+                _azure_ready = bool(_os_startup.environ.get("AZURE_SPEECH_KEY") and _os_startup.environ.get("AZURE_SPEECH_REGION"))
                 _tts_test_fut = _tts_pool.submit(_generate_tts_sync, "Hello Sir, I am ready.", "en-IN-PrabhatNeural", TTS_RATE)
-                _tts_test_audio = _tts_test_fut.result(timeout=30)
+                _tts_test_audio = await asyncio.get_running_loop().run_in_executor(None, lambda: _tts_test_fut.result(timeout=30))
                 if _tts_test_audio:
                     _engine = "Azure en-IN-PrabhatNeural (Indian male)" if _azure_ready else "OpenAI ash fallback"
                     _vol_label = f"+{_TTS_VOLUME_GAIN:.1f}x volume" if _TTS_VOLUME_GAIN != 1.0 else "native volume"
@@ -277,6 +284,7 @@ async def lifespan(app: FastAPI):
                     logger.error("  - TTS: FAILED — both Azure and OpenAI returned empty audio")
             except Exception as _tts_e:
                 logger.error("  - TTS: FAILED — %s", _tts_e)
+        asyncio.create_task(_bg_tts_selftest())
 
         logger.info("=" * 60)
         logger.info("J.A.R.V.I.S is online and ready!")
@@ -298,39 +306,41 @@ async def lifespan(app: FastAPI):
         scheduler.start()
         logger.info("[SCHEDULER] APScheduler started — camera cleanup every 30min (purge >2h), task cleanup every 30min, keep-alive ping every 4min")
 
-        yield
+    except Exception as e:
+        # Never re-raise. A failure in any single startup step must NOT take the
+        # whole Space down with a permanent 500. We log it and still yield below,
+        # so the app always serves the UI and /health. Any service that failed to
+        # initialize stays None and its own endpoints return a clean 503 instead.
+        logger.error("[STARTUP] Non-fatal startup error — continuing in degraded mode: %s", e, exc_info=True)
 
+    yield
+
+    # ── Shutdown (best-effort; never blocks or crashes container exit) ──
+    try:
         logger.info("\nShutting down J.A.R.V.I.S...")
         _tts_pool.shutdown(wait=True)
-
-        try:
-            scheduler.shutdown(wait=False)
-            logger.info("[SCHEDULER] APScheduler stopped")
-        except Exception:
-            pass
-
+        if scheduler:
+            try:
+                scheduler.shutdown(wait=False)
+                logger.info("[SCHEDULER] APScheduler stopped")
+            except Exception:
+                pass
         if task_manager:
             task_manager.shutdown()
-
         if chat_service:
             for session_id in list(chat_service.sessions.keys()):
                 chat_service.save_chat_session(session_id, sync_cloud=True)
-
-        # Only sync FAISS index back to S3 if the vector store was actually
-        # enabled this session — otherwise we'd be re-uploading stale files
-        # from a previous run.
+        # Only sync FAISS index back to S3 if the vector store was actually enabled
+        # this session — otherwise we'd re-upload stale files from a previous run.
         if VECTOR_STORE_ENABLED and vector_store_service is not None:
             for _fname in ["index.faiss", "index.pkl"]:
                 _local = VECTOR_STORE_DIR / _fname
                 if _local.exists():
                     upload_bytes_to_s3(_local.read_bytes(), f"vector_store/{_fname}")
                     logger.info("[SHUTDOWN] FAISS %s → S3", _fname)
-
         logger.info("All sessions saved. Goodbye!")
-
     except Exception as e:
-        logger.error(f"Fatal error during startup: {e}", exc_info=True)
-        raise
+        logger.warning("[SHUTDOWN] Error during shutdown (ignored): %s", e)
 
 
 app = FastAPI(

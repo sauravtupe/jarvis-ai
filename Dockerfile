@@ -30,4 +30,6 @@ RUN python app/generate_thinking_audio.py || echo "[WARN] Starter audio generati
 
 EXPOSE 7860
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
+# Self-healing supervisor: if uvicorn ever exits (OOM kill, crash, HF recycle),
+# relaunch it within ~2s instead of leaving the Space stuck on a permanent 500.
+CMD ["sh", "-c", "while true; do uvicorn app.main:app --host 0.0.0.0 --port 7860; echo '[supervisor] uvicorn exited - restarting in 2s'; sleep 2; done"]
