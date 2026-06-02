@@ -11,7 +11,7 @@ let autoListenMode = false;
 const SPEECH_ERROR_MAX_RETRIES = 15;
 let speechErrorRetryCount = 0;
 const SPEECH_SEND_DELAY_MS = 1000;   // silence after a final command before sending (was 1800 — felt sluggish)
-const SPEECH_RESTART_DELAY_MS = 150; // gap between listening sessions; kept tiny + a watchdog re-arms a dead recognizer so "Jarvis" isn't missed (was 700→250)
+const SPEECH_RESTART_DELAY_MS = 80;  // gap between listening sessions; kept as small as Chrome allows so the mic is deaf for the least time possible (a soft "Jarvis" spoken in this gap is otherwise lost). InvalidStateError from restarting too soon is now swallowed in startListening(), so this can stay tiny. (was 700→250→150→80)
 let speechSendTimeout = null;
 let pendingSendTranscript = null;
 let safariVoiceHintShown = false;
@@ -235,7 +235,7 @@ function _disableMic() {
 // timeout, after ~60s, when the tab backgrounds, or when a restart is dropped in
 // the tiny gap between sessions. When that happens nothing is actually listening,
 // so the user has to say "Jarvis" several times. This watchdog notices a dead
-// recognizer (we think we're listening but aren't) and re-arms it within ~2s, so
+// recognizer (we think we're listening but aren't) and re-arms it within ~0.7s, so
 // passive wake-word listening stays effectively continuous.
 function _startWakeWatchdog() {
     if (_wakeWatchdog) return;
@@ -247,7 +247,7 @@ function _startWakeWatchdog() {
         // Should be listening but isn't — revive it.
         if (settings && settings.wakeWord && _micState !== MIC_STATE_ACTIVE) _enterPassiveListening();
         else startListening();
-    }, 2000);
+    }, 700);
 }
 
 function _stopWakeWatchdog() {
@@ -1037,10 +1037,12 @@ function initSpeech() {
         const msg = (e && e.error) ? String(e.error) : '';
         // "no-speech" is completely normal — user was quiet. Restart silently without counting retries.
         if (msg === 'no-speech') {
+            // Normal — you were just quiet. Restart immediately via maybeRestartListening()
+            // (it has its own minimal gap) instead of STACKING another delay on top. The old
+            // double setTimeout left the mic deaf ~300ms every few seconds — exactly when a
+            // softly-spoken "Jarvis" got dropped and you had to say it again.
             stopListening();
-            if (autoListenMode && !isStreaming) {
-                setTimeout(() => maybeRestartListening(), SPEECH_RESTART_DELAY_MS);
-            }
+            if (autoListenMode && !isStreaming) maybeRestartListening();
             return;
         }
         stopListening();
@@ -1099,6 +1101,13 @@ function startListening() {
     try {
         recognition.start();
     } catch (err) {
+        // InvalidStateError just means the previous session hasn't fully ended yet — the
+        // recognizer is effectively already (re)starting, so it IS listening. Keep
+        // isListening = true and let the pending onend/onstart settle. The old code rebuilt
+        // `recognition` on every such race, throwing away a live session right when you might
+        // have been saying "Jarvis". Only a genuinely broken recognizer (any OTHER error)
+        // gets nuked and recreated.
+        if (err && err.name === 'InvalidStateError') return;
         isListening = false;
         if (micBtn) micBtn.classList.remove('listening');
         if (speechWidget) speechWidget.classList.remove('visible');
