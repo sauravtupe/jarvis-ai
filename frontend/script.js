@@ -94,7 +94,7 @@ function _enterVideoWatchMode() {
         micBtn.title = 'Voice paused while a video is open — say "done" or click to resume';
     }
     if (typeof showToast === 'function') {
-        showToast('🎬 Voice paused while you watch the video. Say "done" when finished — or click the mic to talk now.', 7000);
+        showToast('🎬 Voice paused while you watch. Switch back to this tab and voice resumes automatically — or click the mic to talk now.', 7000);
     }
 }
 
@@ -112,6 +112,36 @@ function _exitVideoWatchMode() {
     } else if (typeof micBtn !== 'undefined' && micBtn) {
         micBtn.title = 'Voice input';
     }
+}
+
+// Auto-resume voice when the user returns to the JARVIS tab/window after watching
+// a video. The video opens in a NEW TAB, so this tab is backgrounded and the mic is
+// paused (and Chrome suspends recognition for hidden tabs anyway). Previously the
+// only way back was a manual mic click — the user couldn't say "done" because nothing
+// was listening. Coming back to this tab IS the "I want to talk again" signal, so we
+// exit video-watch mode and restart listening automatically. No-op unless a video is
+// currently being watched, so ordinary tab switches are unaffected.
+function _resumeVoiceOnReturn() {
+    if (!_videoWatchMode) return;
+    // Recognition was stopped on video-open and this tab was backgrounded, which can
+    // leave Chrome's SpeechRecognition engine wedged (start() then silently does
+    // nothing). Rebuild a fresh recognizer before resuming so detection is immediate
+    // and reliable again — there is no live session to lose, it was already stopped.
+    try {
+        if (recognition && recognition.abort) recognition.abort();
+        else if (recognition) recognition.stop();
+    } catch (_) {}
+    isListening = false;
+    speechErrorRetryCount = 0;
+    recognition = null;
+    initSpeech();
+    _exitVideoWatchMode();
+}
+if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') _resumeVoiceOnReturn();
+    });
+    window.addEventListener('focus', _resumeVoiceOnReturn);
 }
 
 // ─── Wake-word state machine ("Jarvis" hands-free activation) ───────────────
