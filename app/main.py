@@ -1738,7 +1738,7 @@ async def serve_static(file_path: str):
         raise HTTPException(status_code=404, detail="Not found")
     suffix = full_path.suffix.lower()
     media_type = _MEDIA_TYPES.get(suffix, "application/octet-stream")
-    cache = "public, max-age=3600" if suffix in (".mp3", ".wav", ".ogg", ".png", ".jpg", ".ico", ".woff2", ".woff") else "no-cache"
+    cache = "public, max-age=3600" if suffix in (".mp3", ".wav", ".ogg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".ico", ".woff2", ".woff") else "no-cache"
     return Response(
         content=full_path.read_bytes(),
         media_type=media_type,

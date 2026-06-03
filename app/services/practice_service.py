@@ -31,20 +31,40 @@ _NUMBER_WORDS = {
 }
 
 # Ordinal words → digits so spoken commands like "third standard" / "first chapter"
-# resolve. Previously only digit-ordinals ("3rd standard") parsed for the class, so
-# "third standard" returned class=None and the command opened a random URL instead.
+# resolve. Previously only digit-ordinals ("3rd standard") parsed for the class.
 _ORDINAL_WORDS = {
     'first': '1', 'second': '2', 'third': '3', 'fourth': '4', 'fifth': '5',
     'sixth': '6', 'seventh': '7', 'eighth': '8', 'ninth': '9', 'tenth': '10',
     'eleventh': '11', 'twelfth': '12',
 }
 
+# Keywords that legitimise an adjacent ordinal as a class/chapter NUMBER. An ordinal
+# is converted to a digit ONLY when it sits immediately before one of these.
+_CLASS_CHAPTER_CTX = r'(?:class|grade|std|standard|chapter|lesson|lecture)'
+# Pre-compiled "ordinal immediately before a class/chapter keyword" matchers.
+_ORDINAL_CTX_RES = [
+    (re.compile(rf'\b{word}\b(?=\s+{_CLASS_CHAPTER_CTX}\b)', re.IGNORECASE), digit)
+    for word, digit in _ORDINAL_WORDS.items()
+]
+# "5th" / "3rd" → bare digit so "5th chapter" / "3rd standard" parse cleanly.
+_DIGIT_ORDINAL_SUFFIX_RE = re.compile(r'\b(\d{1,2})(?:st|nd|rd|th)\b', re.IGNORECASE)
+
 def _normalize_number_words(text: str) -> str:
-    """Replace English number AND ordinal words with digits so "class two" → "class 2"
-    and "third standard" → "3 standard"."""
-    for word, digit in {**_NUMBER_WORDS, **_ORDINAL_WORDS}.items():
-        text = re.sub(rf'\b{word}\b', digit, text, flags=re.IGNORECASE)
-    return text
+    """Replace English number words with digits ("class two" → "class 2").
+
+    Cardinals ("one".."twelve") convert anywhere — they rarely collide with a class
+    or chapter keyword in ordinary prose. Ordinals ("first".."twelfth") convert ONLY
+    when immediately before a class/chapter keyword ("third standard" → "3 standard"),
+    because a bare ordinal is a common English word ("came first", "on second thought")
+    and converting it everywhere made unrelated sentences resolve to a class/chapter.
+    Digit ordinals ("5th") are stripped to bare digits so "5th chapter" parses.
+    """
+    out = text or ""
+    for word, digit in _NUMBER_WORDS.items():
+        out = re.sub(rf'\b{word}\b', digit, out, flags=re.IGNORECASE)
+    for rx, digit in _ORDINAL_CTX_RES:
+        out = rx.sub(digit, out)
+    return _DIGIT_ORDINAL_SUFFIX_RE.sub(r'\1', out)
 
 def extract_class_from_message(text: str) -> Optional[str]:
     normalized = _normalize_number_words(text or "")

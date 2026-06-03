@@ -433,21 +433,10 @@ def _normalize_hindi_keywords(text: str) -> str:
     return out
 
 
-# English ordinals → digits. Allows commands like "first lecture" / "5th chapter".
-_ORDINAL_WORDS = {
-    "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
-    "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10",
-    "eleventh": "11", "twelfth": "12",
-}
-
-
-def _normalize_ordinals(text: str) -> str:
-    out = text or ""
-    for word, digit in _ORDINAL_WORDS.items():
-        out = re.sub(rf"\b{word}\b", digit, out, flags=re.IGNORECASE)
-    # Also strip 1st / 2nd / 3rd / 4th suffixes so "1st chapter" parses cleanly.
-    out = re.sub(r"\b(\d{1,2})(?:st|nd|rd|th)\b", r"\1", out, flags=re.IGNORECASE)
-    return out
+# Ordinal + number-word normalisation (scoped "first chapter" → "1 chapter" and
+# "5th" → "5") lives in practice_service._normalize_number_words, imported above and
+# shared by both the class and chapter extractors. Kept single-source so the
+# ordinal-scoping rule can't drift between the two files.
 
 
 def _strip_class_portion(text: str) -> str:
@@ -482,9 +471,7 @@ def extract_chapter_from_message(text: str, strip_class: bool = True) -> Optiona
     By default the class portion (e.g. "class 5", "UKG") is stripped first so
     the "N chapter" pattern doesn't mistakenly grab the class number.
     """
-    normalised = _normalize_ordinals(
-        _normalize_number_words(_normalize_hindi_keywords(text or ""))
-    )
+    normalised = _normalize_number_words(_normalize_hindi_keywords(text or ""))
     search_text = _strip_class_portion(normalised) if strip_class else normalised
 
     for pattern in (_CHAPTER_AFTER_RE, _CHAPTER_BEFORE_RE):

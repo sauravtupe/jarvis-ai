@@ -18,9 +18,16 @@ let pendingSendTranscript = null;
 // NEVER emits a final result if you pause — leaving the command captured on screen
 // yet never sent. We remember the latest interim command and, if no final arrives
 // within INTERIM_SETTLE_MS of silence, treat that interim as the command and send it.
-const INTERIM_SETTLE_MS = 1800;
+// Tuned to 2200ms (up from 1800) so a natural pause MID-command ("open class
+// five … chapter three") doesn't fire early and split the utterance into two messages.
+const INTERIM_SETTLE_MS = 2200;
 let _lastInterimCommand = '';
+let _lastInterimAt = 0;          // Date.now() when _lastInterimCommand was captured
 let _interimSettleTimer = null;
+// A kept interim (held across an isStreaming bail) is retried from onend — but onend
+// can fire much later (long stream, returning from a video). Drop anything older than
+// this so a command spoken ages ago and abandoned isn't sent out of the blue.
+const INTERIM_MAX_AGE_MS = 6000;
 // De-dupe identical voice commands fired within this window. Chrome can emit a late
 // "final" for an utterance we already flushed as interim (see _flushInterimCommand),
 // which would send the same command twice (duplicate message + TTS over itself).
@@ -235,6 +242,7 @@ function _noteInterimCommand(text) {
     const t = (text || '').trim();
     if (t.length < 2) return;
     _lastInterimCommand = t;
+    _lastInterimAt = Date.now();
     if (_interimSettleTimer) clearTimeout(_interimSettleTimer);
     _interimSettleTimer = setTimeout(_flushInterimCommand, INTERIM_SETTLE_MS);
 }
@@ -259,6 +267,13 @@ function _flushInterimCommand() {
     if (_interimSettleTimer) { clearTimeout(_interimSettleTimer); _interimSettleTimer = null; }
     let cmd = (_lastInterimCommand || '').trim();
     if (cmd.length < 2) return;
+    // Drop a stale capture. This runs from onend too, which can fire long after the
+    // words were spoken; without the age check an abandoned command would suddenly
+    // send. A fresh interim kept across an isStreaming bail is still well within range.
+    if (_lastInterimAt && (Date.now() - _lastInterimAt) > INTERIM_MAX_AGE_MS) {
+        _lastInterimCommand = '';
+        return;
+    }
     if (isStreaming) return;            // keep _lastInterimCommand; onend will retry
     // Strip a leading wake word. If nothing meaningful is left (the utterance was just
     // "Jarvis"), there's no command — bail instead of sending a bare "jarvis". The
