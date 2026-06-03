@@ -470,6 +470,13 @@ def extract_chapter_from_message(text: str, strip_class: bool = True) -> Optiona
 
     By default the class portion (e.g. "class 5", "UKG") is stripped first so
     the "N chapter" pattern doesn't mistakenly grab the class number.
+
+    NOTE: this can return a number from incidental prose — e.g. "the first
+    lecture was boring" normalises to "the 1 lecture …" → 1. That's harmless
+    today because every caller (match_lecture_command / match_notes_command /
+    match_practical_command) also requires a class keyword, which such prose
+    lacks. Only trust this result alongside a class-keyword gate; do NOT call it
+    standalone to decide whether the user named a chapter.
     """
     normalised = _normalize_number_words(_normalize_hindi_keywords(text or ""))
     search_text = _strip_class_portion(normalised) if strip_class else normalised
