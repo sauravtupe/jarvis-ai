@@ -14,6 +14,13 @@ const SPEECH_SEND_DELAY_MS = 1000;   // silence after a final command before sen
 const SPEECH_RESTART_DELAY_MS = 80;  // gap between listening sessions; kept as small as Chrome allows so the mic is deaf for the least time possible (a soft "Jarvis" spoken in this gap is otherwise lost). InvalidStateError from restarting too soon is now swallowed in startListening(), so this can stay tiny. (was 700→250→150→80)
 let speechSendTimeout = null;
 let pendingSendTranscript = null;
+// Chrome with continuous+interimResults often shows interim text ("what is") but
+// NEVER emits a final result if you pause — leaving the command captured on screen
+// yet never sent. We remember the latest interim command and, if no final arrives
+// within INTERIM_SETTLE_MS of silence, treat that interim as the command and send it.
+const INTERIM_SETTLE_MS = 1800;
+let _lastInterimCommand = '';
+let _interimSettleTimer = null;
 let safariVoiceHintShown = false;
 let orb = null;
 let pendingAttachment = null; // { upload_id, filename, content_type, extracted_text }
@@ -86,6 +93,7 @@ function _enterVideoWatchMode() {
     _videoWatchMode = true;
     _autoListenBeforeVideo = autoListenMode;
     autoListenMode = false;
+    _clearInterimSettle();   // don't let a half-heard interim fire while a video is open
     if (isListening) {
         try { recognition && recognition.stop(); } catch (_) {}
     }
@@ -198,6 +206,41 @@ function _clearWakeActiveTimer() {
     }
 }
 
+function _clearInterimSettle() {
+    if (_interimSettleTimer) { clearTimeout(_interimSettleTimer); _interimSettleTimer = null; }
+    _lastInterimCommand = '';
+}
+
+// Remember the latest interim command and arm the settle timer. If a real final
+// result arrives first it cancels this (via _clearInterimSettle); if not, the
+// timer fires and sends what we heard so the command is never silently dropped.
+function _noteInterimCommand(text) {
+    const t = (text || '').trim();
+    if (t.length < 2) return;
+    _lastInterimCommand = t;
+    if (_interimSettleTimer) clearTimeout(_interimSettleTimer);
+    _interimSettleTimer = setTimeout(_flushInterimCommand, INTERIM_SETTLE_MS);
+}
+
+// Send the last interim command (Chrome never produced a final). Strips a leading
+// wake word, ignores stop-commands, and won't fire while a request is already
+// streaming (the interim is retried from onend in that case).
+function _flushInterimCommand() {
+    if (_interimSettleTimer) { clearTimeout(_interimSettleTimer); _interimSettleTimer = null; }
+    let cmd = (_lastInterimCommand || '').trim();
+    if (cmd.length < 2) return;
+    if (isStreaming) return;            // keep _lastInterimCommand; onend will retry
+    const w = _matchWakeWord(cmd);
+    if (w && w.remaining && w.remaining.length >= 2) cmd = w.remaining;
+    _lastInterimCommand = '';
+    if (typeof VOICE_STOP_COMMANDS !== 'undefined' && VOICE_STOP_COMMANDS.test(cmd)) return;
+    pendingSendTranscript = null;
+    clearTimeout(speechSendTimeout);
+    speechSendTimeout = null;
+    _clearWakeActiveTimer();
+    sendMessage(cmd);
+}
+
 function _startActiveWindow() {
     _setMicState(MIC_STATE_ACTIVE);
     _clearWakeActiveTimer();
@@ -254,6 +297,7 @@ function _enterActiveListening() {
 
 function _disableMic() {
     _clearWakeActiveTimer();
+    _clearInterimSettle();
     _stopWakeWatchdog();
     _setMicState(MIC_STATE_OFF);
     autoListenMode = false;
@@ -995,13 +1039,16 @@ function initSpeech() {
                 if (speechWidgetText) speechWidgetText.textContent = wake.remaining;
                 if (isFinal) {
                     _clearWakeActiveTimer();
+                    _clearInterimSettle();
                     pendingSendTranscript = null;
                     clearTimeout(speechSendTimeout);
                     speechSendTimeout = null;
                     sendMessage(wake.remaining);
                 } else {
-                    // Interim — open the active window so the user has time to finish
+                    // Interim — open the active window so the user has time to finish,
+                    // and remember it so it still sends if Chrome never finalizes.
                     if (_micState !== MIC_STATE_ACTIVE) _startActiveWindow();
+                    _noteInterimCommand(wake.remaining);
                 }
             } else {
                 // Bare wake word — open the 10s command window
@@ -1019,6 +1066,8 @@ function initSpeech() {
             ttsPlayer.stopped = false;
         }
         if (isFinal && transcript) {
+            // A real final arrived — cancel the interim-settle fallback so it can't double-send.
+            _clearInterimSettle();
             // Intercept voice control commands — handle locally, never send to backend
             if (VOICE_STOP_COMMANDS.test(transcript)) {
                 if (ttsPlayer) { ttsPlayer.stop(); ttsPlayer.stopped = false; }
@@ -1054,8 +1103,10 @@ function initSpeech() {
                 if (!settings.wakeWord) stopListening();
             }, SPEECH_SEND_DELAY_MS);
         } else if (!isFinal) {
-            // Interim activity in ACTIVE — extend the 10s window
+            // Interim activity in ACTIVE — extend the 10s window and remember the
+            // text so it still sends if Chrome never produces a final result.
             _resetActiveWindow();
+            _noteInterimCommand(transcript);
             pendingSendTranscript = null;
             clearTimeout(speechSendTimeout);
             speechSendTimeout = null;
@@ -1097,6 +1148,12 @@ function initSpeech() {
             speechSendTimeout = null;
             sendMessage(pendingSendTranscript);
             pendingSendTranscript = null;
+        } else if (_lastInterimCommand) {
+            // Session ended with captured interim text but Chrome never finalized it —
+            // send it now instead of silently dropping the command.
+            clearTimeout(speechSendTimeout);
+            speechSendTimeout = null;
+            _flushInterimCommand();
         } else {
             clearTimeout(speechSendTimeout);
             speechSendTimeout = null;
