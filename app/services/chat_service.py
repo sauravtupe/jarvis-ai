@@ -428,6 +428,26 @@ class ChatService:
         # --- Lecture catalog command (pre-brain shortcut, Feature 8) ---
         _lec = _ls.match_lecture_command(user_message)
         if _lec:
+            if _lec.get("_missing") == "class":
+                # Open-intent + chapter, but no class → ask rather than open a random video.
+                _resp = (
+                    "Sir, which class? For example, say 'open Class 3 Chapter 1' "
+                    "or 'open 3rd standard chapter 1'. I have classes from UKG to Class 12."
+                )
+                self.sessions[session_id][-1].content = _resp
+                yield _resp
+                self.save_chat_session(session_id)
+                return
+            if _lec.get("_missing") == "chapter":
+                _cd = "UKG" if _lec["class_name"] == "UKG" else f"Class {_lec['class_num']}"
+                _resp = (
+                    f"Sir, which chapter of {_cd} would you like me to open? "
+                    f"For example, 'open {_cd} Chapter 1'."
+                )
+                self.sessions[session_id][-1].content = _resp
+                yield _resp
+                self.save_chat_session(session_id)
+                return
             if _lec.get("_not_found"):
                 # Command parsed but no video is saved for that slot.
                 _miss_resp = (

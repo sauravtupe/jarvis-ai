@@ -21,9 +21,19 @@ _NUMBER_WORDS = {
     'eleven': '11', 'twelve': '12',
 }
 
+# Ordinal words → digits so spoken commands like "third standard" / "first chapter"
+# resolve. Previously only digit-ordinals ("3rd standard") parsed for the class, so
+# "third standard" returned class=None and the command opened a random URL instead.
+_ORDINAL_WORDS = {
+    'first': '1', 'second': '2', 'third': '3', 'fourth': '4', 'fifth': '5',
+    'sixth': '6', 'seventh': '7', 'eighth': '8', 'ninth': '9', 'tenth': '10',
+    'eleventh': '11', 'twelfth': '12',
+}
+
 def _normalize_number_words(text: str) -> str:
-    """Replace English number words with digits so "class two" → "class 2"."""
-    for word, digit in _NUMBER_WORDS.items():
+    """Replace English number AND ordinal words with digits so "class two" → "class 2"
+    and "third standard" → "3 standard"."""
+    for word, digit in {**_NUMBER_WORDS, **_ORDINAL_WORDS}.items():
         text = re.sub(rf'\b{word}\b', digit, text, flags=re.IGNORECASE)
     return text
 

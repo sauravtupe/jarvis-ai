@@ -458,8 +458,13 @@ def _strip_class_portion(text: str) -> str:
     the pattern "N chapter" would match "5 chapter" → chapter=5 (wrong).
     """
     out = re.sub(r"\b(UKG|kindergarten)\b", "", text or "", flags=re.IGNORECASE)
-    out = re.sub(r"\b(class|std|standard|grade)\s*\d{1,2}\b", "", out, flags=re.IGNORECASE)
+    # Strip the NUMBER-BEFORE-WORD form ("3 standard", "5 class") FIRST. If the
+    # "<word> <num>" form is stripped first, the "standard" in "3 standard 1 chapter"
+    # greedily eats the CHAPTER's number ("standard 1"), leaving "3 chapter" → chapter
+    # mis-parsed as the class number 3. The number-before-word form must claim its own
+    # preceding number before the other pattern can run.
     out = re.sub(r"\b\d{1,2}\s*(class|grade|std|standard)\b", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\b(class|std|standard|grade)\s*\d{1,2}\b", "", out, flags=re.IGNORECASE)
     return out
 
 
@@ -510,33 +515,76 @@ def is_lecture_command(text: str) -> bool:
     return bool(_CLASS_WORD_RE.search(normalised) and _CHAPTER_WORD_RE.search(normalised))
 
 
-def match_lecture_command(text: str) -> Optional[Dict]:
-    """Parse a lecture command and return the matched catalog entry.
+# Open/play/watch verbs (English; Hindi verbs are normalised to these by
+# _normalize_hindi_keywords). Used to recognise an under-specified command as a
+# genuine "open a lecture" request, so we ask for the missing piece instead of
+# letting it fall through to the brain (which would open a random URL).
+_LECTURE_OPEN_VERB_RE = re.compile(
+    r"\b(open|play|start|show|watch|launch|begin|put\s+on)\b", re.IGNORECASE
+)
 
-    Returns None if:
-    - text doesn't look like a lecture command (no class+chapter keywords)
-    - class or chapter cannot be parsed
-    - the catalog has no entry for that slot (also returns a "_not_found" hint)
+
+def _class_num_str(class_name: str) -> str:
+    return "UKG" if class_name == "UKG" else class_name.replace("class_", "").upper()
+
+
+def match_lecture_command(text: str) -> Optional[Dict]:
+    """Parse a lecture-open command and resolve it against the catalog.
+
+    Returns None when the text isn't a lecture-open request at all. When it
+    clearly is one but is under-specified, returns a hint so the caller can ask
+    the student — instead of letting the message reach the brain, which opens a
+    random URL:
+      {"_missing": "class",   "chapter": int}                  — chapter given, class missing
+      {"_missing": "chapter", "class_name", "class_num"}       — class given, chapter missing
+      {"_not_found": True, "class_name", "class_num", "chapter"} — both given, no saved video
+      {full record}                                            — success
     """
-    if not is_lecture_command(text):
+    if not text:
         return None
+
+    # Practice commands ("practice for class 6 chapter 1") also carry class+chapter
+    # keywords but must be served by the practical handler — never opened as a video.
+    # (The practical handler runs AFTER this one, so without this guard the lecture
+    # shortcut would shadow it.)
+    try:
+        from app.services.practical_service import is_practical_command
+        if is_practical_command(text):
+            return None
+    except Exception:
+        pass
 
     normalised = _normalize_hindi_keywords(text)
+    has_open_verb = bool(_LECTURE_OPEN_VERB_RE.search(normalised))
+
     class_name = extract_class_from_message(normalised)
-    # extract_chapter_from_message already normalises Hindi keywords internally,
-    # but pass the pre-normalised string anyway for consistency.
+    # chapter is only ever non-None when a chapter/lesson/lecture keyword + number
+    # is present, so its presence already implies a chapter keyword.
     chapter = extract_chapter_from_message(normalised)
-    if not class_name or not chapter:
+
+    full = bool(class_name and chapter)
+    # Under-specified, but a verb makes the open-intent unambiguous. The verb gate
+    # stops statements like "what is 5th grade math" or "chapter 5 was great" from
+    # being treated as commands.
+    missing_class = bool(chapter and not class_name and has_open_verb)
+    missing_chapter = bool(class_name and not chapter and has_open_verb)
+
+    if not (full or missing_class or missing_chapter):
         return None
+
+    if missing_class:
+        return {"_missing": "class", "chapter": chapter}
+    if missing_chapter:
+        return {"_missing": "chapter", "class_name": class_name,
+                "class_num": _class_num_str(class_name)}
 
     chapter_key = f"chapter_{chapter}"
     catalog = _load_catalog()
     record = catalog.get(class_name, {}).get(chapter_key)
-
-    class_num_str = class_name.replace("class_", "").upper() if class_name != "UKG" else "UKG"
+    class_num_str = _class_num_str(class_name)
 
     if not record:
-        # Signal to caller that the command parsed but the slot is empty.
+        # Command parsed fully but no video is saved for that slot.
         return {
             "_not_found": True,
             "class_name": class_name,

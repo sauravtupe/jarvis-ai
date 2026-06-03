@@ -1718,9 +1718,15 @@ async def serve_index():
     return _HTMLResponse(content=html, media_type="text/html", headers=_NO_CACHE_HEADERS)
 
 _MEDIA_TYPES = {
+    # .html MUST be here — without it the default below is application/octet-stream,
+    # which makes the browser DOWNLOAD viewer.html (the image viewer page) instead of
+    # rendering it, producing a flood of "viewer (N).html" downloads and no visible image.
+    ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
+    ".json": "application/json", ".map": "application/json", ".txt": "text/plain; charset=utf-8",
     ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
     ".css": "text/css", ".js": "application/javascript",
-    ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".gif": "image/gif", ".svg": "image/svg+xml",
     ".ico": "image/x-icon", ".woff2": "font/woff2", ".woff": "font/woff",
 }
 
