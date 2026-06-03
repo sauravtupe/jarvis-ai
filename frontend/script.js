@@ -21,6 +21,14 @@ let pendingSendTranscript = null;
 const INTERIM_SETTLE_MS = 1800;
 let _lastInterimCommand = '';
 let _interimSettleTimer = null;
+// De-dupe identical voice commands fired within this window. Chrome can emit a late
+// "final" for an utterance we already flushed as interim (see _flushInterimCommand),
+// which would send the same command twice (duplicate message + TTS over itself).
+// Short tokens (≤3 chars: quiz answers "a"/"b", "yes", "no", "ok") are exempt so a
+// genuine quick repeat isn't swallowed.
+const VOICE_DEDUP_MS = 2500;
+let _lastVoiceSent = '';
+let _lastVoiceSentAt = 0;
 let safariVoiceHintShown = false;
 let orb = null;
 let pendingAttachment = null; // { upload_id, filename, content_type, extracted_text }
@@ -136,8 +144,17 @@ function _resumeVoiceOnReturn() {
     // nothing). Rebuild a fresh recognizer before resuming so detection is immediate
     // and reliable again — there is no live session to lose, it was already stopped.
     try {
-        if (recognition && recognition.abort) recognition.abort();
-        else if (recognition) recognition.stop();
+        if (recognition) {
+            // Detach handlers BEFORE abort/null. abort() fires `end` asynchronously;
+            // if those handlers stayed attached, the dying recognizer's late onend
+            // would run against the GLOBAL `recognition` (now the fresh one we build
+            // below) and its `if (isListening) stopListening()` / maybeRestartListening()
+            // could stop or double-restart the new session — making the mic flap right
+            // after you return to the tab, the opposite of this feature's goal.
+            recognition.onend = recognition.onresult = recognition.onerror = recognition.onstart = null;
+            if (recognition.abort) recognition.abort();
+            else recognition.stop();
+        }
     } catch (_) {}
     isListening = false;
     speechErrorRetryCount = 0;
@@ -222,6 +239,19 @@ function _noteInterimCommand(text) {
     _interimSettleTimer = setTimeout(_flushInterimCommand, INTERIM_SETTLE_MS);
 }
 
+// Route every voice-initiated send through here so the same command fired twice in
+// quick succession is de-duped (Chrome emitting a late "final" for an utterance we
+// already flushed as interim). Short tokens are exempt — see VOICE_DEDUP_MS.
+function _sendVoiceCommand(cmd) {
+    const c = (cmd || '').trim();
+    if (!c) return;
+    const now = Date.now();
+    if (c.length > 3 && c === _lastVoiceSent && (now - _lastVoiceSentAt) < VOICE_DEDUP_MS) return;
+    _lastVoiceSent = c;
+    _lastVoiceSentAt = now;
+    sendMessage(c);
+}
+
 // Send the last interim command (Chrome never produced a final). Strips a leading
 // wake word, ignores stop-commands, and won't fire while a request is already
 // streaming (the interim is retried from onend in that case).
@@ -230,15 +260,21 @@ function _flushInterimCommand() {
     let cmd = (_lastInterimCommand || '').trim();
     if (cmd.length < 2) return;
     if (isStreaming) return;            // keep _lastInterimCommand; onend will retry
+    // Strip a leading wake word. If nothing meaningful is left (the utterance was just
+    // "Jarvis"), there's no command — bail instead of sending a bare "jarvis". The
+    // length check must run AFTER stripping, since "jarvis" alone is 6 chars.
     const w = _matchWakeWord(cmd);
-    if (w && w.remaining && w.remaining.length >= 2) cmd = w.remaining;
+    if (w) {
+        if (!w.remaining || w.remaining.length < 2) { _lastInterimCommand = ''; return; }
+        cmd = w.remaining;
+    }
     _lastInterimCommand = '';
     if (typeof VOICE_STOP_COMMANDS !== 'undefined' && VOICE_STOP_COMMANDS.test(cmd)) return;
     pendingSendTranscript = null;
     clearTimeout(speechSendTimeout);
     speechSendTimeout = null;
     _clearWakeActiveTimer();
-    sendMessage(cmd);
+    _sendVoiceCommand(cmd);
 }
 
 function _startActiveWindow() {
@@ -1043,7 +1079,7 @@ function initSpeech() {
                     pendingSendTranscript = null;
                     clearTimeout(speechSendTimeout);
                     speechSendTimeout = null;
-                    sendMessage(wake.remaining);
+                    _sendVoiceCommand(wake.remaining);
                 } else {
                     // Interim — open the active window so the user has time to finish,
                     // and remember it so it still sends if Chrome never finalizes.
@@ -1093,7 +1129,7 @@ function initSpeech() {
             speechSendTimeout = setTimeout(() => {
                 if (pendingSendTranscript) {
                     _clearWakeActiveTimer();
-                    sendMessage(pendingSendTranscript);
+                    _sendVoiceCommand(pendingSendTranscript);
                     pendingSendTranscript = null;
                 }
                 speechSendTimeout = null;
@@ -1146,7 +1182,7 @@ function initSpeech() {
         if (pendingSendTranscript) {
             clearTimeout(speechSendTimeout);
             speechSendTimeout = null;
-            sendMessage(pendingSendTranscript);
+            _sendVoiceCommand(pendingSendTranscript);
             pendingSendTranscript = null;
         } else if (_lastInterimCommand) {
             // Session ended with captured interim text but Chrome never finalized it —

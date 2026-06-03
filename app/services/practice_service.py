@@ -8,9 +8,18 @@ from config import PRACTICE_PDFS_DIR, PRACTICE_CLASSES
 
 logger = logging.getLogger("J.A.R.V.I.S")
 
+# Matches a class identifier in EITHER word order:
+#   "class 5" / "grade 5" / "standard 5" / "std 5"   (word before number)
+#   "5 class" / "5th grade" / "5 standard"            (number before word)
+# Both orders accept all four class words. Previously the word-first branch only
+# accepted "class" (not grade/standard/std), so "open grade 6 chapter 2" failed to
+# resolve the class and the lecture handler asked "which class?" even though the
+# class was clearly stated. This now mirrors _strip_class_portion, which already
+# strips all four words in both orders. re.search returns the LEFTMOST match, so an
+# explicit "<n> standard" still wins over a later "standard <chapter-n>".
 _CLASS_RE = re.compile(
     r'\b(UKG|kindergarten)\b|'
-    r'\bclass\s*(\d{1,2})\b|'
+    r'\b(?:class|grade|std|standard)\s*(\d{1,2})\b|'
     r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(?:class|grade|std|standard)\b',
     re.IGNORECASE,
 )
