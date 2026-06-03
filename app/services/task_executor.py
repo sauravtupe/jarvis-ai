@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import quote, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
-from config import TASK_EXECUTION_TIMEOUT, POLLINATIONS_TOKEN, POLLINATIONS_REFERRER
+from config import TASK_EXECUTION_TIMEOUT, POLLINATIONS_TOKEN, POLLINATIONS_REFERRER, HF_TOKEN
 from app.services.decision_types import (
     INTENT_OPEN, INTENT_PLAY, INTENT_CAMERA,
     INTENT_OPEN_WEBCAM, INTENT_CLOSE_WEBCAM,
@@ -247,10 +247,27 @@ class TaskExecutor:
         prompt = prompt[:4000]
         t0 = time.perf_counter()
 
-        # Raises a descriptive error on failure (the real cause reaches the user).
-        result = self._generate_pollinations(prompt)
-        logger.info("[TASK] Pollinations image downloaded in %.2fs", time.perf_counter() - t0)
-        return result
+        # Primary: Pollinations (free, no auth). On the HF Space's shared datacenter
+        # IP the anonymous tier is throttled (HTTP 429 / 402 "Queue full") — so if it
+        # fails and an HF token is available, fall back to HuggingFace Inference, which
+        # is authenticated and not IP-throttled.
+        try:
+            result = self._generate_pollinations(prompt)
+            logger.info("[TASK] Pollinations image downloaded in %.2fs", time.perf_counter() - t0)
+            return result
+        except Exception as primary_err:
+            if not HF_TOKEN:
+                raise
+            logger.warning("[TASK] Pollinations failed (%s) — falling back to HuggingFace Inference", primary_err)
+            try:
+                result = self._generate_huggingface(prompt)
+                logger.info("[TASK] HuggingFace image generated in %.2fs", time.perf_counter() - t0)
+                return result
+            except Exception as fallback_err:
+                # Surface both causes so the real failure is visible, not guessed.
+                raise RuntimeError(
+                    f"Image generation failed. Pollinations: {primary_err} | HuggingFace fallback: {fallback_err}"
+                )
 
 
     def _generate_pollinations(self, prompt: str) -> tuple:
@@ -294,8 +311,10 @@ class TaskExecutor:
                     last_detail = (resp.text or "")[:200]
                 logger.warning("[TASK] Pollinations attempt %d: status=%s %s",
                                attempt + 1, resp.status_code, last_detail)
-                # Rate-limited → back off longer (Seed tier allows ~1 request / 5s).
-                if resp.status_code == 429:
+                # 429 = rate-limited, 402 = "Queue full for IP (max: 1)". Both are
+                # transient per-IP limits on the anonymous tier — back off longer and
+                # retry so the in-flight request can drain (Seed tier ~1 request / 5s).
+                if resp.status_code in (429, 402):
                     time.sleep(6)
                     continue
             except Exception as e:
@@ -304,13 +323,69 @@ class TaskExecutor:
             time.sleep(2)
 
         # All attempts exhausted — raise with the real cause so it's visible, not guessed.
-        if last_status == 429 or last_status is None:
+        if last_status in (429, 402) or last_status is None:
             raise RuntimeError(
                 "Image service is rate-limiting this server"
                 + (f" (HTTP {last_status})" if last_status else " (no response)")
-                + ". Set a free POLLINATIONS_TOKEN (auth.pollinations.ai) as an HF Space secret to fix this."
+                + ". Anonymous Pollinations is throttled from this IP; set a free POLLINATIONS_TOKEN."
             )
         raise RuntimeError(f"Image service error (HTTP {last_status}): {last_detail or 'no image returned'}")
+
+    def _generate_huggingface(self, prompt: str) -> tuple:
+        """Fallback image generation via HuggingFace Inference (authenticated).
+
+        Pollinations' anonymous tier blocks the HF Space's shared datacenter IP, but
+        an authenticated HF Inference request is not IP-throttled. Returns (label, bytes)
+        matching the Pollinations return shape; the served Content-Type is sniffed from
+        the bytes downstream, so PNG/JPEG both work. Raises RuntimeError on failure.
+        """
+        import httpx
+        # Try a few free serverless text-to-image endpoints; return the first that
+        # yields real image bytes. FLUX.1-schnell is fast and high quality; SDXL is a
+        # broadly-available fallback if the provider doesn't serve FLUX.
+        candidates = (
+            "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
+            "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+            "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0",
+        )
+        headers = {
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Accept": "image/png",
+            "User-Agent": "Jarvis-AI/1.0",
+        }
+        body = {"inputs": prompt}
+        last_detail = ""
+        for endpoint in candidates:
+            model_label = endpoint.rsplit("/models/", 1)[-1]
+            for attempt in range(2):
+                try:
+                    with httpx.Client(timeout=90, follow_redirects=True) as client:
+                        resp = client.post(endpoint, headers=headers, json=body)
+                    ctype = resp.headers.get("content-type", "")
+                    if resp.status_code == 200 and resp.content and (
+                        "image" in ctype or len(resp.content) > 1000
+                    ):
+                        logger.info("[TASK] HuggingFace image fetched from %s (%d bytes, %s)",
+                                    model_label, len(resp.content), ctype or "unknown")
+                        return (f"hf:{model_label}", resp.content)
+                    # 503 = model cold-loading; wait the estimated time (capped) and retry once.
+                    if resp.status_code == 503 and attempt == 0:
+                        wait = 12
+                        try:
+                            wait = min(int(resp.json().get("estimated_time", 12)) + 2, 30)
+                        except Exception:
+                            pass
+                        logger.info("[TASK] HF model %s loading, waiting %ds", model_label, wait)
+                        time.sleep(wait)
+                        continue
+                    last_detail = f"{model_label}: HTTP {resp.status_code} {(resp.text or '')[:160]}"
+                    logger.warning("[TASK] HuggingFace %s", last_detail)
+                    break  # non-retryable status → try next candidate model
+                except Exception as e:
+                    last_detail = f"{model_label}: {e}"
+                    logger.warning("[TASK] HuggingFace request failed: %s", last_detail)
+                    break
+        raise RuntimeError(f"HuggingFace Inference returned no image ({last_detail or 'all endpoints failed'})")
 
     def _do_content(self, payload: dict, chat_history: Optional[List[tuple]] = None) -> Optional[str]:
         prompt = (payload.get("prompt", payload.get("message", "")) or "").strip()
