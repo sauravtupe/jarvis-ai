@@ -394,7 +394,7 @@ function _maybeStartWakeWord() {
 
 let _ttsAudio = null;   // dedicated pre-unlocked element for inline TTS playback
 const SETTINGS_KEY = 'jarvis_settings';
-const DEFAULT_SETTINGS = { autoOpenActivity: true, autoOpenSearchResults: true, thinkingSounds: true, voiceInterrupt: true, wakeWord: true };
+const DEFAULT_SETTINGS = { autoOpenActivity: false, autoOpenSearchResults: false, thinkingSounds: true, voiceInterrupt: true, wakeWord: true };
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
 let PRE_STARTER_CACHE = {};
 let settings = { ...DEFAULT_SETTINGS };
@@ -2449,7 +2449,13 @@ async function sendMessage(textOverride) {
                         // Pause speech recognition — the video's audio leaks through the speakers
                         // and the mic would otherwise transcribe it as user input (loop).
                         _enterVideoWatchMode();
-                        window.open(data.youtube_detected.url, '_blank');
+                        // Open in our own full-bleed fullscreen player (no YouTube
+                        // sidebar/recommendations) when we have the video id; the player
+                        // auto-falls back to youtube.com if the video can't be embedded.
+                        const _ytPlayerUrl = data.youtube_detected.video_id
+                            ? `${window.location.origin}/app/player.html?v=${encodeURIComponent(data.youtube_detected.video_id)}`
+                            : data.youtube_detected.url;
+                        window.open(_ytPlayerUrl, '_blank');
                     }
                     if (data.interactive_choice && data.interactive_choice.type === 'youtube_analysis') {
                         // User signalled "done" — server acknowledged. Resume mic if it was on.
