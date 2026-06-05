@@ -982,6 +982,19 @@ function loadSettings() {
         if (s) {
             const parsed = JSON.parse(s);
             settings = { ...DEFAULT_SETTINGS, ...parsed };
+            // One-time migration: these panels used to default ON, so existing
+            // users have `true` saved. Force them OFF once, then never again —
+            // after this the user's own toggle choice (on or off) is respected.
+            if (!parsed.autoOpenDefaultsMigrated) {
+                settings.autoOpenActivity = false;
+                settings.autoOpenSearchResults = false;
+                settings.autoOpenDefaultsMigrated = true;
+                saveSettings();
+            }
+        } else {
+            // Brand-new user: defaults are already OFF; mark migrated so the
+            // reset above never runs against their future choices.
+            settings.autoOpenDefaultsMigrated = true;
         }
         if (toggleAutoActivity) toggleAutoActivity.checked = settings.autoOpenActivity;
         if (toggleAutoSearch) toggleAutoSearch.checked = settings.autoOpenSearchResults;
