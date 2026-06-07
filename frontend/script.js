@@ -394,7 +394,7 @@ function _maybeStartWakeWord() {
 
 let _ttsAudio = null;   // dedicated pre-unlocked element for inline TTS playback
 const SETTINGS_KEY = 'jarvis_settings';
-const DEFAULT_SETTINGS = { autoOpenActivity: false, autoOpenSearchResults: false, thinkingSounds: true, voiceInterrupt: true, wakeWord: true };
+const DEFAULT_SETTINGS = { autoOpenActivity: false, autoOpenSearchResults: false, thinkingSounds: true, voiceInterrupt: true, wakeWord: true, hideChat: false };
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
 let PRE_STARTER_CACHE = {};
 let settings = { ...DEFAULT_SETTINGS };
@@ -442,6 +442,7 @@ const toggleAutoSearch    = $('toggle-auto-search');
 const toggleThinkingSounds = $('toggle-thinking-sounds');
 const toggleVoiceInterrupt = $('toggle-voice-interrupt');
 const toggleWakeWord       = $('toggle-wake-word');
+const toggleHideChat       = $('toggle-hide-chat');
 const toastContainer     = $('toast-container');
 const uploadBtn          = $('upload-btn');
 const uploadInput        = $('upload-input');
@@ -1001,12 +1002,24 @@ function loadSettings() {
         if (toggleThinkingSounds) toggleThinkingSounds.checked = settings.thinkingSounds;
         if (toggleVoiceInterrupt) toggleVoiceInterrupt.checked = settings.voiceInterrupt;
         if (toggleWakeWord) toggleWakeWord.checked = settings.wakeWord;
+        if (toggleHideChat) toggleHideChat.checked = settings.hideChat;
+        applyHideChat();
     } catch (_) {}
 }
 
 function saveSettings() {
     try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch (_) {}
+}
+
+// Hide-chat (voice-only) mode: toggles a body class that hides conversational
+// chat bubbles via CSS, while rich outputs (quizzes, summaries, practice sheets,
+// notes, images, generated content) stay visible. Purely visual — TTS, brain
+// routing, and all rendering are untouched, so it's safe to flip on/off anytime.
+function applyHideChat() {
+    try {
+        document.body.classList.toggle('hide-chat', !!settings.hideChat);
     } catch (_) {}
 }
 
@@ -1959,6 +1972,16 @@ function bindEvents() {
         toggleVoiceInterrupt.addEventListener('change', () => {
             settings.voiceInterrupt = toggleVoiceInterrupt.checked;
             saveSettings();
+        });
+    }
+    if (toggleHideChat) {
+        toggleHideChat.addEventListener('change', () => {
+            settings.hideChat = toggleHideChat.checked;
+            saveSettings();
+            applyHideChat();
+            showToast(settings.hideChat
+                ? 'Chat hidden. You\'ll still hear Jarvis and see quizzes, summaries and practice.'
+                : 'Chat visible again.', 3500);
         });
     }
     if (toggleWakeWord) {
@@ -3098,6 +3121,10 @@ async function startSummary(videoId) {
         if (loadingEl && loadingEl.closest('.message')) loadingEl.closest('.message').remove();
         const summaryEl = addMessage('assistant', '');
         summaryEl.innerHTML = renderMarkdown(data.summary);
+        // Summary is plain markdown (no card class), so tag its bubble as a rich
+        // output — this keeps it visible in hide-chat (voice-only) mode.
+        const summaryMsg = summaryEl.closest && summaryEl.closest('.message');
+        if (summaryMsg) summaryMsg.classList.add('rich-output');
         speakText(data.summary);
     } catch (e) {
         if (loadingEl) loadingEl.textContent = `Sorry Sir, summary generation failed: ${e.message}`;

@@ -362,6 +362,20 @@ textarea { font-family: var(--font); color: var(--text); }
     margin: 0 auto;
 }
 
+/* Hide-chat (voice-only) mode: hide conversational bubbles, but keep any message
+   that carries a rich output (quiz, summary, notes, practice, image, generated
+   content, or the lecture action buttons). `:has()` matches by the card class so
+   no per-render tagging is needed; the summary (plain markdown) is the lone
+   exception and is tagged `.rich-output` in JS. Also hides the typing indicator. */
+body.hide-chat .message:not(.rich-output):not(:has(
+    .quiz-card, .quiz-result-card, .notes-card,
+    .practice-files-wrap, .practical-bundle,
+    .msg-actions-images, .msg-actions-contents, .bg-task-card,
+    .yt-choice-wrap
+)) {
+    display: none;
+}
+
 .message.user { flex-direction: row-reverse; }
 .msg-avatar {
     width: 30px;
