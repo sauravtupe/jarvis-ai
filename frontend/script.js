@@ -178,7 +178,9 @@ if (typeof document !== 'undefined' && document.addEventListener) {
 
 // ─── Wake-word state machine ("Jarvis" hands-free activation) ───────────────
 // PASSIVE  : mic running, only acts on the "Jarvis" wake word
-// ACTIVE   : wake word heard, command capture window open (10s)
+// ACTIVE   : wake word heard, command capture window open (stays open up to 30 min
+//            so a long pause before speaking never drops the command; resets on
+//            any speech, then returns to PASSIVE once a command is handled)
 // BLOCKED  : Jarvis is speaking / video is playing / response streaming
 // OFF      : wake word disabled or mic permission not yet granted
 const MIC_STATE_OFF = 'off';
@@ -188,11 +190,18 @@ const MIC_STATE_BLOCKED = 'blocked';
 let _micState = MIC_STATE_OFF;
 let _wakeActiveTimer = null;
 let _wakeWatchdog = null;   // keeps Web Speech alive so the wake word isn't missed (see _startWakeWatchdog)
-const WAKE_ACTIVE_WINDOW_MS = 10000;
+// Command-capture window after the wake word. NOT an "off switch" — passive
+// wake-word listening is always-on (kept alive by the watchdog). This only bounds
+// how long Jarvis waits for your COMMAND after hearing "Jarvis". It's a very
+// generous 30-minute safety cap (was 10s, which dropped commands when the user
+// paused before speaking); it resets on any speech and only self-heals back to
+// wake-word mode if nobody speaks at all for the full 30 minutes, so a
+// stray/accidental wake can't leave the mic hot literally forever.
+const WAKE_ACTIVE_WINDOW_MS = 1800000;  // 30 min
 // Substring matcher for the wake word. The SpeechRecognition engine mis-hears
 // "Jarvis" constantly, so we accept a broad set of look-alikes/sound-alikes —
-// recall matters more than precision here (a stray match just opens the 10s
-// command window). Add more variants here if a real misread keeps slipping through.
+// recall matters more than precision here (a stray match just opens the command
+// window). Add more variants here if a real misread keeps slipping through.
 const _WAKE_WORD_RE = /\b(jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b/i;
 
 function _matchWakeWord(text) {
@@ -1128,7 +1137,7 @@ function initSpeech() {
                     _noteInterimCommand(wake.remaining);
                 }
             } else {
-                // Bare wake word — open the 10s command window
+                // Bare wake word — open the command window (up to 30 min, resets on speech)
                 if (speechWidgetText) speechWidgetText.textContent = 'Listening, Sir…';
                 _startActiveWindow();
             }
@@ -1180,7 +1189,7 @@ function initSpeech() {
                 if (!settings.wakeWord) stopListening();
             }, SPEECH_SEND_DELAY_MS);
         } else if (!isFinal) {
-            // Interim activity in ACTIVE — extend the 10s window and remember the
+            // Interim activity in ACTIVE — extend the command window and remember the
             // text so it still sends if Chrome never produces a final result.
             _resetActiveWindow();
             _noteInterimCommand(transcript);
@@ -1307,7 +1316,7 @@ function maybeRestartListening() {
     if (!autoListenMode) return;
     setTimeout(() => {
         if (autoListenMode && !isStreaming && !isListening && recognition && !_jarvisSpeaking && !_videoWatchMode) {
-            // Wake-word mode: never auto-restart into ACTIVE. The 10s command
+            // Wake-word mode: never auto-restart into ACTIVE. The command
             // window only opens after we hear "Jarvis" again. Returning here
             // means the previous response finished or the user cancelled.
             if (settings && settings.wakeWord && _micState !== MIC_STATE_ACTIVE) {
