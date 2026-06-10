@@ -959,6 +959,7 @@ function init() {
     _initAuthUI();
     _initAuth();
     _maybeStartWakeWord();
+    _initCardDismiss();
 }
 
 function _initAuthUI() {
@@ -966,6 +967,74 @@ function _initAuthUI() {
     if (googleBtn) googleBtn.addEventListener('click', _signInWithGoogle);
     const logoutBtn = $('logout-btn');
     if (logoutBtn) logoutBtn.addEventListener('click', _signOut);
+}
+
+// ─── Dismissible cards (✕) ───────────────────────────────────────────────────
+// Every generated rich card (image, blog/content, MCQ question + result, practice
+// sheet, notes, practice files) gets a small ✕ in its top-right corner. Clicking it
+// fades out and removes the whole containing message bubble, so the screen reclaims
+// the space the card occupied. A MutationObserver tags cards as they appear (no
+// per-render wiring needed), and a single delegated click handler does the removal.
+// Purely visual — nothing is deleted server-side; the user can regenerate any card.
+const _DISMISSIBLE_CARD_SELECTOR = [
+    '.quiz-card', '.quiz-result-card', '.notes-card',
+    '.practice-files-wrap', '.practical-bundle',
+    '.msg-actions-images', '.msg-actions-contents', '.bg-task-card',
+    '.yt-choice-wrap'
+].join(', ');
+
+function _addCardCloseBtn(card) {
+    if (!card || !card.classList) return;
+    // The lecture action buttons (.yt-choice-wrap) live inside a bubble that also
+    // holds the "Sir, I've analysed the video" line — anchor the ✕ to that whole
+    // bubble content so it sits at the card's top-right corner, above the buttons.
+    let host = card;
+    if (card.classList.contains('yt-choice-wrap')) {
+        host = card.closest('.msg-content') || card;
+    }
+    if (host.dataset.cardCloseAdded) return;
+    host.dataset.cardCloseAdded = '1';
+    host.classList.add('has-card-close');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'jarvis-card-close';
+    btn.title = 'Dismiss';
+    btn.setAttribute('aria-label', 'Dismiss this card');
+    btn.innerHTML = '&times;';
+    host.appendChild(btn);
+}
+
+function _initCardDismiss() {
+    if (!chatMessages) return;
+    // Delegated click — fade out and remove the whole message bubble (reclaims space).
+    chatMessages.addEventListener('click', (e) => {
+        const btn = e.target.closest && e.target.closest('.jarvis-card-close');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const target = btn.closest('.message') || btn.closest(_DISMISSIBLE_CARD_SELECTOR);
+        if (!target) return;
+        if (typeof gsap !== 'undefined') {
+            gsap.to(target, { opacity: 0, y: -6, duration: 0.2, ease: 'power1.in',
+                onComplete: () => target.remove() });
+        } else {
+            target.remove();
+        }
+    });
+    // Add a ✕ to cards as they're inserted (and any already present).
+    const tagAll = (root) => {
+        if (!root || root.nodeType !== 1) return;
+        if (root.matches && root.matches(_DISMISSIBLE_CARD_SELECTOR)) _addCardCloseBtn(root);
+        if (root.querySelectorAll) root.querySelectorAll(_DISMISSIBLE_CARD_SELECTOR).forEach(_addCardCloseBtn);
+    };
+    try {
+        new MutationObserver((muts) => {
+            for (const m of muts) {
+                for (const node of m.addedNodes) tagAll(node);
+            }
+        }).observe(chatMessages, { childList: true, subtree: true });
+    } catch (_) {}
+    tagAll(chatMessages);
 }
 
 async function preloadStarterAudio() {

@@ -376,6 +376,44 @@ body.hide-chat .message:not(.rich-output):not(:has(
     display: none;
 }
 
+/* Dismissible-card ✕ button — top-right of every generated card. Click removes the
+   whole message bubble (handled in script.js _initCardDismiss). */
+.has-card-close { position: relative; }
+.jarvis-card-close {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 6;
+    width: 26px;
+    height: 26px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid rgba(140, 170, 255, 0.28);
+    border-radius: 50%;
+    background: rgba(15, 20, 34, 0.62);
+    color: #cdd9f5;
+    font-size: 19px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.55;
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+    transition: opacity .15s ease, background .15s ease, transform .15s ease, color .15s ease;
+}
+.jarvis-card-close:hover {
+    opacity: 1;
+    background: rgba(210, 70, 70, 0.92);
+    border-color: rgba(255, 120, 120, 0.6);
+    color: #fff;
+    transform: scale(1.08);
+}
+.jarvis-card-close:active { transform: scale(0.96); }
+/* Keep the ✕ clear of the practice sheet's own header/download button. */
+.practical-bundle.has-card-close .practical-bundle-header { padding-right: 38px; }
+/* Lecture action-buttons bubble: make room for the ✕ above the buttons. */
+.msg-content.has-card-close { padding-right: 40px; }
+
 .message.user { flex-direction: row-reverse; }
 .msg-avatar {
     width: 30px;
