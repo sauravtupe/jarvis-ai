@@ -553,6 +553,19 @@ def _boost_volume(mp3_bytes: bytes, gain: float = _TTS_VOLUME_GAIN) -> bytes:
     return mp3_bytes
 
 
+# Shared connection pool for Azure TTS. Sentence-level synthesis fires several
+# requests per reply; without keep-alive each one pays a fresh TLS handshake to
+# Azure from the datacenter, which is both slower and the most hang-prone step.
+_azure_tts_session = None
+
+def _azure_session():
+    global _azure_tts_session
+    if _azure_tts_session is None:
+        import requests as _rq
+        _azure_tts_session = _rq.Session()
+    return _azure_tts_session
+
+
 def _azure_tts(text: str, voice: str = "en-IN-PrabhatNeural", rate: Optional[str] = None) -> bytes:
     """Azure AI Speech REST API — native Indian voices (PrabhatNeural / MadhurNeural).
 
@@ -587,8 +600,11 @@ def _azure_tts(text: str, voice: str = "en-IN-PrabhatNeural", rate: Optional[str
     }
 
     try:
-        import requests as _rq
-        resp = _rq.post(endpoint, headers=headers, data=ssml.encode("utf-8"), timeout=30)
+        # 8s cap: a single sentence synthesizes in ~1-2s normally. A hung Azure
+        # connection used to block the whole audio stream for the full 30s before
+        # the OpenAI fallback kicked in (observed as a ~46s "frozen" voice reply
+        # on the HF Space). Failing fast keeps the worst case under ~12s.
+        resp = _azure_session().post(endpoint, headers=headers, data=ssml.encode("utf-8"), timeout=8)
         if resp.status_code == 200 and resp.content:
             logger.info("[TTS] Azure %s OK len=%d", voice, len(resp.content))
             return resp.content
