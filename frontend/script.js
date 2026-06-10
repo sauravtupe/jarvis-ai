@@ -2847,28 +2847,55 @@ function renderPracticeFiles(payload, contentEl) {
 }
 
 let _quizAudio = null;
+let _speakSeq = 0;          // newest speakText() wins; supersedes any pending/playing one
+let _speakResolve = null;   // resolves the in-flight speak's await so its cleanup runs
+
+// Cancel any quiz/summary speech that's in flight — a question read still LOADING
+// (so it bails before it ever plays) or one already PLAYING (stop it now). This is
+// what makes an early answer-click work: bumping the token makes a pending read bail
+// at its next checkpoint, and resolving the stored promise lets that call's finally
+// run so _onJarvisSpeechEnd stays balanced (mic state never gets stuck).
+function _cancelQuizSpeech() {
+    _speakSeq++;
+    if (_quizAudio) { try { _quizAudio.pause(); } catch (_) {} _quizAudio = null; }
+    if (_speakResolve) { const r = _speakResolve; _speakResolve = null; r(); }
+}
+
 async function speakText(text) {
     if (!ttsPlayer || !ttsPlayer.enabled || !text) return;
-    if (_quizAudio) { _quizAudio.pause(); _quizAudio = null; }
+    // Newest speak wins. If the user answers before/while a question is being read,
+    // this cancels that read so the late audio can't trample the correct/wrong feedback.
+    _cancelQuizSpeech();
+    const mySeq = _speakSeq;
     const audio = _speakAudio || document.createElement('audio');
-    _quizAudio = audio;
     let spoke = false;
+    let url = null;
     try {
         const res = await fetch(`${API}/tts`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text }),
         });
-        if (!res.ok) return;
+        // Answered (or another speak started) while the audio was loading → don't play.
+        if (mySeq !== _speakSeq || !res.ok) return;
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
+        if (mySeq !== _speakSeq) return;
+        url = URL.createObjectURL(blob);
         audio.src = url;
+        _quizAudio = audio;
         _onJarvisSpeechStart();
         spoke = true;
         await new Promise((resolve) => {
-            audio.onended = () => { URL.revokeObjectURL(url); if (_quizAudio === audio) _quizAudio = null; resolve(); };
-            audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-            audio.play().catch(e => { console.warn('speakText play error:', e); resolve(); });
+            _speakResolve = resolve;
+            const done = () => {
+                if (url) { URL.revokeObjectURL(url); url = null; }
+                if (_quizAudio === audio) _quizAudio = null;
+                if (_speakResolve === resolve) _speakResolve = null;
+                resolve();
+            };
+            audio.onended = done;
+            audio.onerror = done;
+            audio.play().catch(e => { console.warn('speakText play error:', e); done(); });
         });
     } catch (e) {
         console.warn('speakText error:', e);
