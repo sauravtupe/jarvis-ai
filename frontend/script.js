@@ -190,6 +190,16 @@ const MIC_STATE_BLOCKED = 'blocked';
 let _micState = MIC_STATE_OFF;
 let _wakeActiveTimer = null;
 let _wakeWatchdog = null;   // keeps Web Speech alive so the wake word isn't missed (see _startWakeWatchdog)
+// Liveness proof for the recognizer. A HEALTHY SpeechRecognition session emits
+// events constantly even in total silence (no-speech errors every ~8s, session
+// end/restart cycles, audiostart, ...). Chrome's engine can also die WITHOUT
+// firing onend/onerror — typically after the machine/tab idles a few minutes —
+// leaving isListening stuck true so the watchdog thinks all is well while
+// nothing is listening ("say Jarvis after 5 min idle → no response" bug).
+// Every recognition event stamps this; if we believe we're listening but get
+// zero events for WAKE_ZOMBIE_MS, the engine is a zombie and gets rebuilt.
+let _lastSpeechEvidence = 0;
+const WAKE_ZOMBIE_MS = 30000;
 // Command-capture window after the wake word. NOT an "off switch" — passive
 // wake-word listening is always-on (kept alive by the watchdog). This only bounds
 // how long Jarvis waits for your COMMAND after hearing "Jarvis". It's a very
@@ -376,7 +386,33 @@ function _startWakeWatchdog() {
     _wakeWatchdog = setInterval(() => {
         if (!recognition || !autoListenMode) return;
         if (isStreaming || _jarvisSpeaking || _videoWatchMode) return;
-        if (isListening) return;                                       // already running
+        if (isListening) {
+            // ZOMBIE CHECK — isListening can lie. Chrome's engine sometimes dies
+            // after a few minutes of idle WITHOUT firing onend/onerror, so the
+            // flag stays true and the revive below never runs ("Jarvis" ignored
+            // until the user toggles wake word off/on). A healthy quiet session
+            // emits events every few seconds (no-speech, end/restart cycles);
+            // total silence for WAKE_ZOMBIE_MS means the engine is dead — rebuild
+            // it from scratch, the same recipe as _resumeVoiceOnReturn.
+            if (Date.now() - _lastSpeechEvidence > WAKE_ZOMBIE_MS) {
+                console.warn('[WAKE] recognizer silent for %ds — rebuilding (zombie session)',
+                             Math.round((Date.now() - _lastSpeechEvidence) / 1000));
+                try {
+                    // Detach handlers BEFORE abort so the dying recognizer's late
+                    // onend can't stop/double-restart the fresh one we build next.
+                    recognition.onend = recognition.onresult = recognition.onerror = recognition.onstart = null;
+                    if (recognition.abort) recognition.abort();
+                    else recognition.stop();
+                } catch (_) {}
+                isListening = false;
+                speechErrorRetryCount = 0;
+                recognition = null;
+                initSpeech();
+                if (settings && settings.wakeWord && _micState !== MIC_STATE_ACTIVE) _enterPassiveListening();
+                else startListening();
+            }
+            return;                                                    // running (and proven alive)
+        }
         if (speechErrorRetryCount >= SPEECH_ERROR_MAX_RETRIES) return; // gave up (e.g. mic permission denied)
         // Should be listening but isn't — revive it.
         if (settings && settings.wakeWord && _micState !== MIC_STATE_ACTIVE) _enterPassiveListening();
@@ -1183,7 +1219,14 @@ function initSpeech() {
     recognition.interimResults = !safariMode;
     recognition.maxAlternatives = 5;  // more guesses for the wake-word scanner to find "Jarvis" in
     recognition.lang = 'en-IN';
+    // Liveness stamps — any event from the engine proves it's alive (see
+    // _lastSpeechEvidence). audiostart/soundstart fire even without speech.
+    recognition.onaudiostart = () => { _lastSpeechEvidence = Date.now(); };
+    recognition.onsoundstart = () => { _lastSpeechEvidence = Date.now(); };
+    recognition.onspeechstart = () => { _lastSpeechEvidence = Date.now(); };
+
     recognition.onresult = e => {
+        _lastSpeechEvidence = Date.now();
         if (!e.results || e.results.length === 0) return;
         // Drop anything the mic captured while Jarvis was speaking — this is Jarvis's own voice.
         // Also drop everything for the rest of this recognition session if Jarvis has
@@ -1312,8 +1355,9 @@ function initSpeech() {
         }
     };
 
-    recognition.onstart = () => { speechErrorRetryCount = 0; };
+    recognition.onstart = () => { _lastSpeechEvidence = Date.now(); speechErrorRetryCount = 0; };
     recognition.onerror = e => {
+        _lastSpeechEvidence = Date.now();
         const msg = (e && e.error) ? String(e.error) : '';
         // "no-speech" is completely normal — user was quiet. Restart silently without counting retries.
         if (msg === 'no-speech') {
@@ -1342,6 +1386,7 @@ function initSpeech() {
     };
 
     recognition.onend = () => {
+        _lastSpeechEvidence = Date.now();
         if (pendingSendTranscript) {
             clearTimeout(speechSendTimeout);
             speechSendTimeout = null;
@@ -1376,6 +1421,7 @@ function startListening() {
         safariVoiceHintShown = true;
     }
     isListening = true;
+    _lastSpeechEvidence = Date.now();   // fresh session gets a full liveness window
     // Fresh recognition session — clear any taint carried from a previous one.
     _micCurrentSessionTainted = false;
     pendingSendTranscript = null;
