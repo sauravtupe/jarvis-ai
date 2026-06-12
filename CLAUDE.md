@@ -111,6 +111,7 @@ jarvis/
 │   └── features/                → Per-feature detail files (read before building)
 ├── config.py                    → All settings + env vars + system prompts
 ├── requirements.txt
+├── smoke_test.py                → Pre-deploy smoke test (run before EVERY deploy)
 ├── run.py                       → Entry point
 └── .env                         → API keys (never commit)
 ```
@@ -167,6 +168,8 @@ TTS is generated via `edge-tts` and returned as base64 audio chunks over SSE alo
 | POST | `/tts` | Text-to-speech MP3 stream |
 | POST | `/quiz/generate` | YouTube → MCQ quiz (10 questions, matches transcript language) |
 | POST | `/quiz/summary` | YouTube → structured summary |
+| POST | `/client-errors` | Frontend JS errors → backend ring buffer (rate-limited, size-capped) |
+| GET | `/admin/errors` | **admin** — last 200 backend+frontend errors, newest first (viewer: lectures drawer → "⚠ Recent Errors") |
 | POST | `/admin/login` | *(Feature 8)* Verify `ADMIN_TOKEN`, returns `{ok}` or 401 |
 | GET/POST/PUT/DELETE | `/lectures(/...)` | *(Feature 8)* Lecture catalog CRUD — **admin-only** via `X-Admin-Token` header |
 | GET | `/lectures/{class}/{chapter}/notes` | *(Notes)* Public — returns saved `{notes_url, notes_type, title}`, 404 if none |
@@ -187,6 +190,10 @@ TTS is generated via `edge-tts` and returned as base64 audio chunks over SSE alo
 # EXISTING
 GROQ_API_KEY=
 GROQ_API_KEY_2=
+# Security hardening (optional — sensible defaults in config.py)
+ALLOWED_ORIGINS=            # comma-separated CORS allowlist; default = HF Space + localhost
+RATE_LIMIT_ENABLED=         # default 1; set 0 to disable the per-IP POST rate limiter
+RATE_LIMIT_PER_MINUTE=      # default 30 (per IP, expensive POST endpoints only)
 GROQ_MODEL=llama-3.3-70b-versatile
 GROQ_BRAIN_MODEL=llama-3.1-8b-instant
 GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
@@ -256,7 +263,9 @@ JWT_SECRET_KEY=
 8. **All new packages** must be added to `requirements.txt` immediately
 9. **Session IDs** are UUID hex strings — always use `chat_service.validate_session_id()`
 10. **user_id placeholder** — use `user_id = 'test-user-001'` everywhere until Feature 7
-11. **Tighten CORS** — change `allow_origins=["*"]` to actual domain only after Feature 7
+11. **CORS is tightened** *(done)* — `allow_origins` comes from `ALLOWED_ORIGINS` in config.py (HF Space + localhost). Never set it back to `["*"]`.
+12. **Run `python smoke_test.py` before EVERY deploy** — it must print "All good" (exit 0). After a deploy, run `python smoke_test.py --prod` to verify the live Space.
+13. **Keep the rate limiter intact** — `RateLimitMiddleware` in main.py protects free-tier quotas (Groq/OpenAI/Supadata) from anonymous abuse. Knobs: `RATE_LIMIT_ENABLED`, `RATE_LIMIT_PER_MINUTE` (default 30/min per IP, POST endpoints only).
 
 ---
 
@@ -272,6 +281,7 @@ python run.py
 
 ## Test Checklist After Every Feature
 
+- [ ] **`python smoke_test.py` passes** (syntax + health + chat + voice/TTS + lecture + image; `--full` adds MCQ + image completion; `--prod` targets the live Space)
 - [ ] `GET /health` — all services healthy
 - [ ] `POST /chat/jarvis/stream` — basic message works
 - [ ] TTS audio plays correctly in browser

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, RedirectResponse, Response
+from fastapi.responses import StreamingResponse, RedirectResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -70,6 +70,7 @@ from config import (
     CHATS_DATA_DIR, OPENAI_API_KEY, GROQ_VISION_MODEL,
     SUPABASE_URL, SUPABASE_ANON_KEY,
     VECTOR_STORE_ENABLED,
+    ALLOWED_ORIGINS, RATE_LIMIT_ENABLED, RATE_LIMIT_PER_MINUTE,
 )
 
 
@@ -81,6 +82,42 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("J.A.R.V.I.S")
+
+# ─── Error visibility ────────────────────────────────────────────────────────
+# Ring buffer of recent errors (backend log records + reported frontend errors),
+# served to the owner via GET /admin/errors. In-memory by design: it answers
+# "what broke recently?", not "what broke ever" — it resets on restart/rebuild.
+from collections import deque as _deque
+
+_ERROR_BUFFER = _deque(maxlen=200)
+
+
+def _record_error(source: str, message: str, detail: str = "", level: str = "ERROR"):
+    from datetime import datetime as _edt
+    _ERROR_BUFFER.append({
+        "ts": _edt.utcnow().isoformat(timespec="seconds") + "Z",
+        "source": source,
+        "level": level,
+        "message": (message or "")[:500],
+        "detail": (detail or "")[:2000],
+    })
+
+
+class _ErrorBufferHandler(logging.Handler):
+    """Mirrors every ERROR-level log record (all existing logger.error(...)
+    call sites — TTS failures, quiz failures, etc.) into the ring buffer."""
+    def emit(self, record):
+        try:
+            detail = ""
+            if record.exc_info and record.exc_info[1] is not None:
+                detail = f"{record.exc_info[0].__name__}: {record.exc_info[1]}"
+            _record_error("backend", record.getMessage(), detail, record.levelname)
+        except Exception:
+            pass  # logging must never take the app down
+
+
+_err_handler = _ErrorBufferHandler(level=logging.ERROR)
+logging.getLogger().addHandler(_err_handler)
 
 vector_store_service: VectorStoreService = None
 groq_service: GroqService = None
@@ -354,11 +391,59 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Per-IP sliding-window limit on the expensive POST endpoints.
+
+    Protects the free-tier Groq/OpenAI/Supadata quotas from anonymous abuse on
+    the public URL. GETs, static files, and /health (keep-alive ping) are never
+    limited. In-memory only — resets on restart, which is fine for this purpose.
+    """
+    PROTECTED_PREFIXES = ("/chat", "/tts", "/quiz", "/practicals",
+                          "/upload", "/classroom", "/client-errors")
+
+    def __init__(self, app):
+        super().__init__(app)
+        from collections import defaultdict, deque
+        self._hits = defaultdict(deque)   # ip -> deque[timestamps]
+        self._last_prune = time.time()
+
+    def _client_ip(self, request: Request) -> str:
+        # The HF Space sits behind a proxy, so the real client is in
+        # X-Forwarded-For (first hop); locally fall back to the socket peer.
+        fwd = request.headers.get("x-forwarded-for", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+
+    async def dispatch(self, request: Request, call_next):
+        if (not RATE_LIMIT_ENABLED or request.method != "POST"
+                or not request.url.path.startswith(self.PROTECTED_PREFIXES)):
+            return await call_next(request)
+        now = time.time()
+        ip = self._client_ip(request)
+        hits = self._hits[ip]
+        while hits and now - hits[0] > 60:
+            hits.popleft()
+        if len(hits) >= RATE_LIMIT_PER_MINUTE:
+            logger.warning("[RATE-LIMIT] %s blocked on %s (%d req/min)",
+                           ip, request.url.path, len(hits))
+            return JSONResponse(status_code=429,
+                                content={"detail": "Rate limit reached. Please wait a moment."})
+        hits.append(now)
+        # Periodically drop idle IPs so the map can't grow unbounded.
+        if now - self._last_prune > 300:
+            self._last_prune = now
+            for stale_ip in [k for k, v in self._hits.items() if not v or now - v[-1] > 120]:
+                del self._hits[stale_ip]
+        return await call_next(request)
+
 
 class TimingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -379,6 +464,7 @@ class NoCacheStaticMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(TimingMiddleware)
 app.add_middleware(NoCacheStaticMiddleware)
+app.add_middleware(RateLimitMiddleware)
 
 @app.get("/api")
 
@@ -1284,6 +1370,37 @@ async def admin_login(request: AdminLoginRequest):
     if not _secrets.compare_digest(request.token, _ADMIN_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid admin token.")
     return {"ok": True}
+
+
+@app.post("/client-errors", status_code=204)
+async def report_client_error(request: Request):
+    """Frontend JS errors land here (window.onerror / unhandledrejection).
+
+    Public but rate-limited (it's in RateLimitMiddleware.PROTECTED_PREFIXES) and
+    size-capped — worst case someone fills the 200-entry ring buffer with noise.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    message = str(body.get("message", ""))[:500].strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message required")
+    detail = str(body.get("stack", ""))[:2000]
+    where = str(body.get("url", ""))[:200]
+    line = body.get("line")
+    if where or line:
+        detail = f"{where}:{line}\n{detail}"[:2000]
+    _record_error("frontend", message, detail)
+    return Response(status_code=204)
+
+
+@app.get("/admin/errors")
+async def get_recent_errors(_: bool = Depends(require_admin)):
+    """Owner-only: the last 200 captured errors, newest first."""
+    return {"errors": list(reversed(_ERROR_BUFFER)), "count": len(_ERROR_BUFFER)}
 
 
 def _lecture_error_to_http(exc: lecture_service.LectureError) -> HTTPException:

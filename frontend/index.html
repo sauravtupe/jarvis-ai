@@ -272,6 +272,10 @@
             </div>
             <div class="lectures-body">
                 <button class="btn-primary lectures-add-btn" id="lectures-add-btn">+ Add Lecture</button>
+                <button class="btn-secondary lectures-errors-btn" id="lectures-errors-btn" title="Recent backend + frontend errors (owner only)">&#9888; Recent Errors</button>
+
+                <!-- Recent errors viewer (admin only, hidden until opened) -->
+                <div class="errors-list" id="errors-list" style="display:none"></div>
 
                 <!-- Inline add/edit form (hidden by default) -->
                 <div class="lecture-form" id="lecture-form" style="display:none">

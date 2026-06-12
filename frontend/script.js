@@ -912,6 +912,49 @@ function initUpload() {
     });
 }
 
+// ─── Error reporting ─────────────────────────────────────────────────────────
+// Uncaught JS errors and unhandled promise rejections are posted to the backend
+// ring buffer (/client-errors) so the owner sees breakage in the admin Errors
+// view without needing the student's console. Throttled client-side; identical
+// consecutive errors are dropped so a render loop can't spam the server.
+let _errReportTimes = [];
+let _errLastMessage = '';
+
+function _reportClientError(message, stack, url, line) {
+    try {
+        const msg = String(message || '').slice(0, 500);
+        if (!msg || msg === _errLastMessage) return;
+        const now = Date.now();
+        _errReportTimes = _errReportTimes.filter(t => now - t < 60000);
+        if (_errReportTimes.length >= 5) return;   // max 5 reports/min
+        _errReportTimes.push(now);
+        _errLastMessage = msg;
+        fetch(`${API}/client-errors`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: msg,
+                stack: String(stack || '').slice(0, 2000),
+                url: String(url || location.pathname).slice(0, 200),
+                line: line || 0,
+            }),
+        }).catch(() => {});
+    } catch (_) { /* error reporting must never throw */ }
+}
+
+function _initErrorReporting() {
+    window.addEventListener('error', (e) => {
+        _reportClientError(e.message, e.error && e.error.stack, e.filename, e.lineno);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        const r = e.reason;
+        _reportClientError(
+            (r && r.message) ? `Unhandled rejection: ${r.message}` : `Unhandled rejection: ${String(r).slice(0, 200)}`,
+            r && r.stack
+        );
+    });
+}
+
 function init() {
     if (!chatMessages || !messageInput) {
         console.error('[JARVIS] Required DOM elements (chat-messages, message-input) not found.');
@@ -960,6 +1003,7 @@ function init() {
     _initAuth();
     _maybeStartWakeWord();
     _initCardDismiss();
+    _initErrorReporting();
 }
 
 function _initAuthUI() {
@@ -3934,6 +3978,61 @@ async function _saveLectureNotes(cls, ch, notesVal, setErr) {
     }
 }
 
+// ─── Admin: recent-errors viewer ─────────────────────────────────────────────
+// Renders the backend's error ring buffer (GET /admin/errors) inside the
+// lectures drawer. Shows backend logger.error()s and reported frontend errors.
+async function _toggleErrorsView() {
+    const list = $('errors-list');
+    const btn = $('lectures-errors-btn');
+    if (!list) return;
+    if (list.style.display !== 'none') {
+        list.style.display = 'none';
+        if (btn) btn.classList.remove('active');
+        return;
+    }
+    list.style.display = '';
+    if (btn) btn.classList.add('active');
+    list.innerHTML = '<p class="errors-empty">Loading…</p>';
+    try {
+        const res = await _adminFetch('/admin/errors');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const errors = data.errors || [];
+        if (!errors.length) {
+            list.innerHTML = '<p class="errors-empty">No errors recorded since the last restart. 🎉</p>';
+            return;
+        }
+        list.innerHTML = '';
+        for (const err of errors) {
+            const row = document.createElement('div');
+            row.className = `error-row error-${(err.source || 'backend')}`;
+            const head = document.createElement('div');
+            head.className = 'error-row-head';
+            const ts = (err.ts || '').replace('T', ' ').replace('Z', ' UTC');
+            head.innerHTML = `<span class="error-source">${escapeHtml(err.source || '?')}</span>` +
+                             `<span class="error-ts">${escapeHtml(ts)}</span>`;
+            const msg = document.createElement('div');
+            msg.className = 'error-msg';
+            msg.textContent = err.message || '';
+            row.appendChild(head);
+            row.appendChild(msg);
+            if (err.detail) {
+                const detail = document.createElement('pre');
+                detail.className = 'error-detail';
+                detail.style.display = 'none';
+                detail.textContent = err.detail;
+                row.appendChild(detail);
+                row.addEventListener('click', () => {
+                    detail.style.display = detail.style.display === 'none' ? '' : 'none';
+                });
+            }
+            list.appendChild(row);
+        }
+    } catch (e) {
+        list.innerHTML = `<p class="errors-empty">Couldn't load errors: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
 // Wire up admin/lectures UI on DOM ready
 (function _initAdminLecturesUI() {
     const bindWhenReady = () => {
@@ -3952,6 +4051,8 @@ async function _saveLectureNotes(cls, ch, notesVal, setErr) {
         if (lecBtn) lecBtn.addEventListener('click', _openLecturesPanel);
         if (lecClose) lecClose.addEventListener('click', _closeLecturesPanel);
         if (addBtn) addBtn.addEventListener('click', () => _showLectureForm('add'));
+        const errorsBtn = $('lectures-errors-btn');
+        if (errorsBtn) errorsBtn.addEventListener('click', _toggleErrorsView);
         if (formCancel) formCancel.addEventListener('click', _hideLectureForm);
         if (formSave) formSave.addEventListener('click', _saveLectureForm);
         if (signinBtn) signinBtn.addEventListener('click', _openAdminModal);

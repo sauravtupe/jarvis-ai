@@ -29,6 +29,24 @@ for _cls in PRACTICE_CLASSES:
 LECTURES_JSON_PATH = BASE_DIR / "database" / "lectures.json"
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
+# ─── Security hardening ──────────────────────────────────────────────────────
+# CORS allowlist (CLAUDE.md rule #11). The frontend is served same-origin by
+# this app, so CORS only governs OTHER websites calling the API from a browser.
+# Comma-separated; override via env for a custom domain.
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        "https://saurav9404-jarvis-ai.hf.space,http://localhost:8000,http://127.0.0.1:8000",
+    ).split(",") if o.strip()
+]
+
+# Per-IP rate limit on expensive POST endpoints (/chat*, /tts, /quiz*, ...).
+# Protects the free-tier Groq/OpenAI/Supadata quotas from anonymous abuse on
+# the public URL. 30/min leaves headroom for the heaviest legit use (an MCQ
+# session peaks around 20 /tts calls per minute).
+RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
+
 # Practical exercises (Feature 9)
 # Practicals live INSIDE lectures.json (no separate file). Only the AI-generated
 # task cache and config constants live here.
@@ -208,8 +226,10 @@ SUPADATA_API_KEYS = _load_supadata_api_keys()
 SUPADATA_API_KEY = SUPADATA_API_KEYS[0] if SUPADATA_API_KEYS else ""  # back-compat
 
 # Supabase (Feature 7 — Google Auth)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+# .strip() so a whitespace-only env override cleanly disables Supabase for
+# local testing (PowerShell can't set an env var to empty — '' deletes it).
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "").strip()
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
 
