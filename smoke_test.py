@@ -69,16 +69,39 @@ def check_python_syntax():
     return "PASS", ""
 
 
-@check("JS syntax (frontend/script.js)")
+# Frontend JS files in their index.html load order. orb.js first (never touched),
+# then the extracted feature modules, then script.js last (the foundation + init).
+# Keep this list in sync with the <script> tags in frontend/index.html.
+_FRONTEND_JS_LOAD_ORDER = ["orb.js", "tts.js", "script.js"]
+
+
+@check("JS syntax + cross-file redeclaration")
 def check_js_syntax():
     node = shutil.which("node")
     if not node:
         return "SKIP", "node not installed"
-    r = subprocess.run([node, "--check", str(ROOT / "frontend" / "script.js")],
-                       capture_output=True, text=True, timeout=30)
+    fe = ROOT / "frontend"
+    files = [fe / f for f in _FRONTEND_JS_LOAD_ORDER if (fe / f).exists()]
+    # 1. Per-file syntax.
+    for f in files:
+        r = subprocess.run([node, "--check", str(f)], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return "FAIL", f"{f.name}: " + (r.stderr or r.stdout).strip().splitlines()[-1][:100]
+    # 2. Concatenated load-order check — catches a top-level let/const declared in
+    #    two files (`Identifier already declared`) or a load-time TDZ reference, which
+    #    per-file checks miss but the browser would hit. This is the safety net for
+    #    the ordered-classic-<script> split (Phase 4).
+    import tempfile, os as _os
+    blob = "\n".join(f.read_text(encoding="utf-8") for f in files)
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8")
+    try:
+        tmp.write(blob); tmp.close()
+        r = subprocess.run([node, "--check", tmp.name], capture_output=True, text=True, timeout=30)
+    finally:
+        _os.unlink(tmp.name)
     if r.returncode != 0:
-        return "FAIL", (r.stderr or r.stdout).strip().splitlines()[-1][:120]
-    return "PASS", ""
+        return "FAIL", "concat: " + (r.stderr or r.stdout).strip().splitlines()[-1][:100]
+    return "PASS", f"{len(files)} files + concat"
 
 
 # ─── Server checks ───────────────────────────────────────────────────────────
