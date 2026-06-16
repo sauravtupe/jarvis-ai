@@ -72,7 +72,7 @@ def check_python_syntax():
 # Frontend JS files in their index.html load order. orb.js first (never touched),
 # then the extracted feature modules, then script.js last (the foundation + init).
 # Keep this list in sync with the <script> tags in frontend/index.html.
-_FRONTEND_JS_LOAD_ORDER = ["orb.js", "tts.js", "script.js"]
+_FRONTEND_JS_LOAD_ORDER = ["orb.js", "tts.js", "voice.js", "script.js"]
 
 
 @check("JS syntax + cross-file redeclaration")
