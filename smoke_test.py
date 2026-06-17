@@ -72,7 +72,8 @@ def check_python_syntax():
 # Frontend JS files in their index.html load order. orb.js first (never touched),
 # then the extracted feature modules, then script.js last (the foundation + init).
 # Keep this list in sync with the <script> tags in frontend/index.html.
-_FRONTEND_JS_LOAD_ORDER = ["orb.js", "tts.js", "voice.js", "auth.js", "learning.js", "admin.js", "script.js"]
+_FRONTEND_JS_LOAD_ORDER = ["orb.js", "core.js", "tts.js", "voice.js", "auth.js",
+                           "learning.js", "admin.js", "media.js", "script.js"]
 
 
 @check("JS syntax + cross-file redeclaration")
@@ -102,6 +103,131 @@ def check_js_syntax():
     if r.returncode != 0:
         return "FAIL", "concat: " + (r.stderr or r.stdout).strip().splitlines()[-1][:100]
     return "PASS", f"{len(files)} files + concat"
+
+
+# Load-order EXECUTION simulation. node --check (above) only PARSES — it cannot see
+# a top-level reference to a binding declared in a later-loading file (e.g. using `$`
+# before core.js defines it), which is a runtime TDZ/ReferenceError the browser hits
+# at load. This harness concatenates the frontend JS in <script> order and executes
+# it once in a vm with a minimal DOM stub, replicating the browser's single shared
+# global scope, so that class of bug fails the smoke test instead of shipping.
+_LOADSIM_JS = r'''
+const vm = require('vm');
+const fs = require('fs');
+const path = require('path');
+const FE_DIR = process.argv[2];
+const ORDER = process.argv.slice(3);
+
+const noop = function () {};
+const elProxy = new Proxy(function () {}, {
+  get(_t, p) {
+    if (p === 'classList') return { add: noop, remove: noop, toggle: noop, contains: () => false };
+    if (p === 'style') return {};
+    if (p === 'dataset') return {};
+    if (p === 'getContext') return () => null;
+    if (p === 'getBoundingClientRect') return () => ({ left: 0, top: 0, width: 0, height: 0 });
+    if (p === 'value' || p === 'textContent' || p === 'innerHTML') return '';
+    if (p === 'checked') return false;
+    if (typeof p === 'symbol') return undefined;
+    return noop;
+  },
+  apply() { return undefined; },
+});
+const documentStub = {
+  getElementById: () => elProxy,
+  querySelector: () => elProxy,
+  querySelectorAll: () => [],
+  getElementsByClassName: () => [],
+  createElement: () => elProxy,
+  createElementNS: () => elProxy,
+  createTextNode: () => elProxy,
+  addEventListener: noop,
+  removeEventListener: noop,
+  readyState: 'loading',
+  body: elProxy,
+  head: elProxy,
+  documentElement: elProxy,
+  cookie: '',
+  hidden: false,
+  visibilityState: 'visible',
+};
+const sandbox = {
+  console,
+  document: documentStub,
+  navigator: { userAgent: 'node', mediaDevices: { getUserMedia: () => Promise.reject(new Error('no cam')) }, language: 'en' },
+  localStorage: { getItem: () => null, setItem: noop, removeItem: noop, clear: noop },
+  sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  location: { href: 'http://localhost/', origin: 'http://localhost', pathname: '/', hash: '', search: '' },
+  history: { replaceState: noop, pushState: noop },
+  addEventListener: noop, removeEventListener: noop,
+  setTimeout: () => 0, clearTimeout: noop, setInterval: () => 0, clearInterval: noop,
+  requestAnimationFrame: () => 0, cancelAnimationFrame: noop,
+  queueMicrotask: noop,
+  fetch: () => Promise.resolve({ ok: false, status: 0, json: () => Promise.resolve({}), text: () => Promise.resolve('') }),
+  matchMedia: () => ({ matches: false, addEventListener: noop, removeEventListener: noop, addListener: noop }),
+  URLSearchParams, URL,
+  atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+  btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
+  Audio: function () { return elProxy; },
+  Image: function () { return elProxy; },
+  FormData: function () { return { append: noop }; },
+  Blob: function () { return {}; },
+  FileReader: function () { return { readAsDataURL: noop, addEventListener: noop }; },
+  Event: function () {}, CustomEvent: function () {},
+  AudioContext: function () { return { createGain: () => ({ connect: noop, gain: {} }), createOscillator: () => ({ connect: noop, start: noop, stop: noop }) }; },
+  speechSynthesis: { speak: noop, cancel: noop, getVoices: () => [] },
+  SpeechSynthesisUtterance: function () {},
+  performance: { now: () => 0 },
+  crypto: { getRandomValues: (a) => a, randomUUID: () => 'x' },
+  MutationObserver: function () { return { observe: noop, disconnect: noop, takeRecords: () => [] }; },
+  ResizeObserver: function () { return { observe: noop, disconnect: noop, unobserve: noop }; },
+  IntersectionObserver: function () { return { observe: noop, disconnect: noop, unobserve: noop }; },
+  getComputedStyle: () => ({ getPropertyValue: () => '' }),
+};
+sandbox.window = sandbox;
+sandbox.self = sandbox;
+sandbox.globalThis = sandbox;
+sandbox.webkitAudioContext = sandbox.AudioContext;
+const ctx = vm.createContext(sandbox);
+
+let blob = '';
+const used = [];
+for (const f of ORDER) {
+  const p = path.join(FE_DIR, f);
+  if (fs.existsSync(p)) { blob += '\n//=== ' + f + ' ===\n' + fs.readFileSync(p, 'utf8'); used.push(f); }
+}
+try {
+  vm.runInContext(blob, ctx, { filename: 'frontend-loadorder.js' });
+  console.log('LOADSIM OK (' + used.length + ' files)');
+} catch (e) {
+  console.log('LOADSIM THROW -> ' + e.name + ': ' + e.message);
+  if (e.stack) console.log(e.stack.split('\n').slice(0, 4).join('\n'));
+  process.exit(3);
+}
+'''
+
+
+@check("JS load-order execution (TDZ / ReferenceError)")
+def check_js_loadsim():
+    node = shutil.which("node")
+    if not node:
+        return "SKIP", "node not installed"
+    fe = ROOT / "frontend"
+    files = [f for f in _FRONTEND_JS_LOAD_ORDER if (fe / f).exists()]
+    import tempfile, os as _os
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8")
+    try:
+        tmp.write(_LOADSIM_JS)
+        tmp.close()
+        r = subprocess.run([node, tmp.name, str(fe), *files],
+                           capture_output=True, text=True, timeout=30)
+    finally:
+        _os.unlink(tmp.name)
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode != 0:
+        throw = next((l for l in out.splitlines() if "THROW" in l), out.splitlines()[-1] if out else "")
+        return "FAIL", throw.replace("LOADSIM THROW -> ", "")[:160]
+    return "PASS", f"{len(files)} files execute clean"
 
 
 # ─── Server checks ───────────────────────────────────────────────────────────
@@ -259,6 +385,7 @@ def main():
     print("Static checks:")
     check_python_syntax()
     check_js_syntax()
+    check_js_loadsim()
 
     print("\nServer checks:")
     if check_health(base) == "FAIL":

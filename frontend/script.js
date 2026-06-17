@@ -66,7 +66,8 @@ const DEFAULT_SETTINGS = { autoOpenActivity: false, autoOpenSearchResults: false
 const PRE_STARTER_FILES = ['starter_1', 'starter_2', 'starter_3', 'starter_4', 'starter_5', 'starter_6', 'starter_7', 'starter_8', 'starter_9', 'starter_10'];
 let PRE_STARTER_CACHE = {};
 let settings = { ...DEFAULT_SETTINGS };
-const $ = id => document.getElementById(id);
+// [Phase 4] const $ = id => document.getElementById(id) moved to core.js (loaded
+// FIRST, before all feature modules) so feature files can use $ at load time.
 const chatMessages = $('chat-messages');
 const messageInput = $('message-input');
 const sendBtn      = $('send-btn');
@@ -469,112 +470,8 @@ const VOICE_QUIZ_ANSWERS = {
     'fourth': 3, 'option four': 3, 'option 4': 3, 'four': 3,
 };
 
-function isCameraQuery(text) {
-    if (!text || typeof text !== 'string') return false;
-    const t = text.trim().toLowerCase();
-    return CAMERA_QUERY_PATTERNS.some(r => r.test(t)) ||
-        (t.includes('see') && (t.includes('what') || t.includes('describe')));
-}
-
-function startCamera() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        showToast('Camera not supported in this browser.');
-        return Promise.reject(new Error('Camera not supported'));
-    }
-    if (camStream) return Promise.resolve();
-    return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false })
-        .then(stream => {
-            camStream = stream;
-            if (camVideo) camVideo.srcObject = stream;
-            if (camPanel) { camPanel.classList.add('visible'); camPanel.setAttribute('aria-hidden', 'false'); }
-            if (camBtn) {
-                camBtn.classList.add('cam-active');
-                camBtn.title = 'Camera on — click to turn off';
-                const icon = camBtn.querySelector('.cam-icon');
-                const iconActive = camBtn.querySelector('.cam-icon-active');
-                if (icon) icon.style.display = 'none';
-                if (iconActive) iconActive.style.display = '';
-            }
-        })
-        .catch(err => {
-            showToast('Camera access denied. ' + (err.message || ''));
-            throw err;
-        });
-}
-
-function stopCamera() {
-    if (camStream) {
-        camStream.getTracks().forEach(t => t.stop());
-        camStream = null;
-    }
-    if (camVideo) camVideo.srcObject = null;
-    if (camPanel) { camPanel.classList.remove('visible'); camPanel.setAttribute('aria-hidden', 'true'); }
-    if (camVisionModeInput) camVisionModeInput.checked = false;
-    if (camBtn) {
-        camBtn.classList.remove('cam-active');
-        camBtn.title = 'Camera — capture and send for vision';
-        const icon = camBtn.querySelector('.cam-icon');
-        const iconActive = camBtn.querySelector('.cam-icon-active');
-        if (icon) icon.style.display = '';
-        if (iconActive) iconActive.style.display = 'none';
-    }
-}
-
-function initCameraPanel() {
-    if (!camPanel) return;
-    let dragStart = { x: 0, y: 0, left: 0, top: 0 };
-    let resizeStart = { x: 0, y: 0, w: 0, h: 0 };
-    if (camClose) camClose.addEventListener('click', () => stopCamera());
-    if (camMinimize) camMinimize.addEventListener('click', () => {
-        camPanel.classList.toggle('minimized');
-    });
-    if (camPanelHeader) {
-        camPanelHeader.addEventListener('mousedown', (e) => {
-            if (e.target.closest('.cam-panel-btn, .cam-panel-vision-mode')) return;
-            e.preventDefault();
-            const r = camPanel.getBoundingClientRect();
-            dragStart = { x: e.clientX, y: e.clientY, left: r.left, top: r.top };
-            const onMove = (ev) => {
-                const dx = ev.clientX - dragStart.x;
-                const dy = ev.clientY - dragStart.y;
-                camPanel.style.left = (dragStart.left + dx) + 'px';
-                camPanel.style.top = (dragStart.top + dy) + 'px';
-                camPanel.style.right = 'auto';
-                camPanel.style.bottom = 'auto';
-            };
-            const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', onUp);
-        });
-    }
-    if (camPanelResize) {
-        camPanelResize.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const r = camPanel.getBoundingClientRect();
-            resizeStart = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
-            const onMove = (ev) => {
-                const dw = ev.clientX - resizeStart.x;
-                const dh = ev.clientY - resizeStart.y;
-                const nw = Math.max(200, Math.min(window.innerWidth, resizeStart.w + dw));
-                const nh = Math.max(150, Math.min(window.innerHeight * 0.7, resizeStart.h + dh));
-                camPanel.style.width = nw + 'px';
-                camPanel.style.height = nh + 'px';
-            };
-            const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', onUp);
-        });
-    }
-    camPanel.addEventListener('dblclick', (e) => {
-        if (e.target.closest('.cam-panel-header') && !e.target.closest('.cam-panel-btn, .cam-panel-vision-mode')) {
-            camPanel.classList.toggle('minimized');
-        }
-    });
-    camPanel.querySelector('.cam-panel-body')?.addEventListener('click', (e) => {
-        if (camPanel.classList.contains('minimized')) camPanel.classList.remove('minimized');
-    });
-}
+// [Phase 4] Camera fns (isCameraQuery, startCamera, stopCamera, initCameraPanel)
+// moved to media.js (loaded before this file). Cam DOM consts + camStream stay here.
 
 function handleActions(actions, contentEl) {
     if (!actions) return;
@@ -745,70 +642,8 @@ function updateTaskCard(cardEl, status, data) {
     scrollToBottom();
 }
 
-function captureFrameAsBase64() {
-    if (!camVideo || !camStream || camVideo.readyState < 2) return null;
-    if (!camCanvas) return null;
-    const w = camVideo.videoWidth;
-    const h = camVideo.videoHeight;
-    if (!w || !h || w < 64 || h < 64) return null;
-    camCanvas.width = w;
-    camCanvas.height = h;
-    const ctx = camCanvas.getContext('2d');
-    if (!ctx) return null;
-    ctx.drawImage(camVideo, 0, 0, w, h);
-    try {
-        return camCanvas.toDataURL('image/jpeg', 0.85).split(',')[1];
-    } catch (_) {
-        return null;
-    }
-}
-
-async function captureFrameAsBase64Safe() {
-    if (!camVideo || !camStream || !camCanvas) return null;
-    return new Promise((resolve) => {
-        const doCapture = () => {
-            const w = camVideo.videoWidth;
-            const h = camVideo.videoHeight;
-            if (!w || !h || w < 64 || h < 64) {
-                resolve(null);
-                return;
-            }
-            camCanvas.width = w;
-            camCanvas.height = h;
-            const ctx = camCanvas.getContext('2d');
-            if (!ctx) { resolve(null); return; }
-            ctx.drawImage(camVideo, 0, 0, w, h);
-            try {
-                const b64 = camCanvas.toDataURL('image/jpeg', 0.9).split(',')[1];
-                resolve(b64);
-            } catch (_) {
-                resolve(null);
-            }
-        };
-        if (camVideo.readyState < 2) {
-            const onReady = () => { camVideo.removeEventListener('loadeddata', onReady); doCapture(); };
-            camVideo.addEventListener('loadeddata', onReady);
-            setTimeout(() => { camVideo.removeEventListener('loadeddata', onReady); doCapture(); }, 3000);
-            return;
-        }
-        const w = camVideo.videoWidth;
-        const h = camVideo.videoHeight;
-        if (w && h && w >= 64 && h >= 64) {
-            if (typeof camVideo.requestVideoFrameCallback === 'function') {
-                camVideo.requestVideoFrameCallback(() => { doCapture(); });
-            } else {
-                setTimeout(doCapture, 150);
-            }
-        } else {
-            setTimeout(() => {
-                const w2 = camVideo.videoWidth || 0;
-                const h2 = camVideo.videoHeight || 0;
-                if (w2 && h2 && w2 >= 64 && h2 >= 64) doCapture();
-                else resolve(null);
-            }, 300);
-        }
-    });
-}
+// [Phase 4] Frame capture (captureFrameAsBase64, captureFrameAsBase64Safe) moved
+// to media.js (loaded before this file).
 
 async function sendMessageWithImage(text, imgBase64) {
     if (!text || !imgBase64 || isStreaming) return;
