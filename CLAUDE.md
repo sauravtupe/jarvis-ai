@@ -97,11 +97,23 @@ jarvis/
 │       ├── retry.py             → Retry decorator
 │       ├── key_rotation.py      → Groq multi-key rotation
 │       └── time_info.py         → Injects current date/time into system prompt
-├── frontend/
-│   ├── index.html               → Single-page app
-│   ├── script.js                → All frontend logic (chat, voice, camera)
-│   ├── style.css                → All styling
-│   └── orb.js                   → WebGL GLSL shader — DO NOT TOUCH THIS FILE
+├── frontend/                    → Vanilla JS, split into ordered classic <script>s
+│   │                              (Phase 4). They share ONE global scope; load
+│   │                              order in index.html matters. core.js FIRST,
+│   │                              script.js LAST. A binding used at load time must
+│   │                              be declared in an earlier-loading file (no TDZ).
+│   ├── index.html               → Single-page app (defines the <script> load order)
+│   ├── core.js                  → $ helper — loaded FIRST so all modules have it at load
+│   ├── orb.js                   → WebGL GLSL shader — DO NOT TOUCH THIS FILE
+│   ├── tts.js                   → TTS playback (PreStarterPlayer, TTSPlayer, speakText)
+│   ├── voice.js                 → Speech input + wake-word state machine + watchdog
+│   ├── auth.js                  → Feature 7 Supabase Google OAuth
+│   ├── learning.js              → YouTube → quiz/MCQ/summary, notes, practice + PDF
+│   ├── admin.js                 → Admin auth + lecture catalog + practice admin panel
+│   ├── media.js                 → Camera/vision + Classroom Attention AI
+│   ├── script.js                → Foundation: shared state, DOM consts, sendMessage,
+│   │                              init/bindEvents, animation IIFEs — loaded LAST
+│   └── style.css                → All styling
 ├── database/
 │   ├── chats_data/              → JSON chat sessions
 │   ├── learning_data/           → Context .txt files (drop files here to add memory)
@@ -258,7 +270,7 @@ JWT_SECRET_KEY=
 3. **Always use** `/chat/jarvis/stream` as the single main endpoint — never bypass it
 4. **Never hardcode** API keys — always read from `.env` via `config.py`
 5. **Keep** Groq key rotation in `key_rotation.py` — it prevents rate limits
-6. **Frontend stays** Vanilla JS only — no React, Vue, Angular, or any JS framework
+6. **Frontend stays** Vanilla JS only — no React, Vue, Angular, or any JS framework. It's split into ordered classic `<script>`s (`core.js` first … `script.js` last) sharing one global scope. **Anything referenced at load time (a top-level `const x = $('id')`, an IIFE body) must be declared in an earlier-loading file** — else the browser throws a load-time TDZ/ReferenceError that `node --check` can't see. The `smoke_test.py` load-order execution sim catches this; keep it green.
 7. **TTS** streams as base64 audio chunks over SSE — never change this format
 8. **All new packages** must be added to `requirements.txt` immediately
 9. **Session IDs** are UUID hex strings — always use `chat_service.validate_session_id()`
