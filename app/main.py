@@ -664,7 +664,10 @@ def _azure_tts(text: str, voice: str = "en-IN-PrabhatNeural", rate: Optional[str
     if not key or not region:
         return b""
 
-    lang = "hi-IN" if voice.startswith("hi-IN") else "en-IN"
+    # Derive the SSML locale from the voice name (e.g. "mr-IN-ManoharNeural" →
+    # "mr-IN"). Hardcoding en-IN here used to mispronounce Marathi/Hindi voices.
+    _vparts = voice.split("-")
+    lang = "-".join(_vparts[:2]) if len(_vparts) >= 2 else "en-IN"
     # Honour the configured TTS_RATE (e.g. "+12%"). Fall back to +15% when caller
     # passes None or empty so existing behaviour is preserved.
     rate_pct = (rate or "").strip() or "+15%"
@@ -779,9 +782,19 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
     return b""
 
 
-def _pick_tts_voice(text: str) -> str:
-    """Pick Azure voice based on script — Hindi (Devanagari) → MadhurNeural, else PrabhatNeural.
+_LANG_VOICE = {
+    "en": "en-IN-PrabhatNeural",
+    "hi": "hi-IN-MadhurNeural",
+    "mr": "mr-IN-ManoharNeural",
+}
+
+def _pick_tts_voice(text: str, lang: Optional[str] = None) -> str:
+    """Pick the Azure voice. An explicit conversation language (manual mode) wins —
+    this is what lets Marathi and Hindi (both Devanagari) be told apart. With no
+    active language, fall back to script detection (Devanagari → Hindi).
     Used by Tier 1 (Azure). Tier 2 (OpenAI) ignores this and hardcodes 'ash'."""
+    if lang in _LANG_VOICE:
+        return _LANG_VOICE[lang]
     if any('ऀ' <= c <= 'ॿ' for c in text):
         return 'hi-IN-MadhurNeural'
     return 'en-IN-PrabhatNeural'
@@ -803,7 +816,16 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
         if not text or not text.strip():
             return
 
-        audio_queue.append((_tts_pool.submit(_generate_tts_sync, text, _pick_tts_voice(text), TTS_RATE), text))
+        # Honour the manual conversation language (read fresh each time so a
+        # language-switch command's own confirmation is already in the new voice).
+        _conv_lang = None
+        try:
+            if chat_service:
+                _conv_lang = chat_service.get_session_metadata(session_id, "conversation_lang")
+        except Exception:
+            pass
+
+        audio_queue.append((_tts_pool.submit(_generate_tts_sync, text, _pick_tts_voice(text, _conv_lang), TTS_RATE), text))
         last_submit_time = time.perf_counter()
 
     def _drain_ready():

@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import List, Optional, Dict, Iterator, Any, Union
@@ -19,6 +20,69 @@ from app.services.vision_service import VisionService
 from app.utils.key_rotation import get_next_key_pair
 
 CAMERA_BYPASS_TOKEN = "TTCAMTOKENTT"
+
+# ----------------------------------------------------------------------------
+# Manual conversation-language mode (English / Hindi / Marathi)
+# ----------------------------------------------------------------------------
+# A spoken or typed command like "speak in Marathi" / "Marathi mein baat karo" /
+# "मराठीत बोल" switches the whole conversation's language. The choice persists in
+# session metadata and drives BOTH the LLM reply language (a system-prompt
+# directive) and the Azure TTS voice. There is NO auto-detection — it is purely
+# manual, so existing behaviour is unchanged until the user issues a command.
+
+# Language-name cues — English words + Devanagari + common romanizations.
+_LANG_NAME_PATTERNS = {
+    "en": re.compile(r"english|इंग्लिश|इंग्रजी|अंग्रेज़ी|अंग्रेजी", re.IGNORECASE),
+    "hi": re.compile(r"hindi|हिंदी|हिन्दी", re.IGNORECASE),
+    "mr": re.compile(r"marathi|मराठी", re.IGNORECASE),
+}
+# Switch-intent cues — must co-occur with a language name, so an incidental
+# mention ("how do you say hi in Marathi") does NOT flip the conversation.
+_LANG_SWITCH_INTENT = re.compile(
+    r"speak|talk|switch|reply|respond|answer|converse|change|"
+    r"baat\s*kar|बात\s*कर|बोल|मध्ये|में\s*बात",
+    re.IGNORECASE,
+)
+
+_LANG_DISPLAY = {"en": "English", "hi": "Hindi", "mr": "Marathi"}
+
+# Confirmation spoken/shown in the NEWLY selected language.
+_LANG_CONFIRMATIONS = {
+    "en": "Sure, Sir. I'll speak with you in English from now on.",
+    "hi": "ठीक है सर, अब मैं आपसे हिंदी में बात करूँगा।",
+    "mr": "ठीक आहे सर. आता मी तुमच्याशी मराठीत बोलेन.",
+}
+# Directive appended to the LLM system prompt while a language is active.
+_LANG_DIRECTIVES = {
+    "en": "IMPORTANT: The user has chosen English as the conversation language. "
+          "Reply ONLY in English, no matter what language the user writes in.",
+    "hi": "IMPORTANT: The user has chosen Hindi as the conversation language. "
+          "Reply ONLY in Hindi (हिंदी, Devanagari script), no matter what language the user writes in.",
+    "mr": "IMPORTANT: The user has chosen Marathi as the conversation language. "
+          "Reply ONLY in Marathi (मराठी, Devanagari script) — never Hindi — "
+          "no matter what language the user writes in.",
+}
+
+
+def match_language_command(text: str) -> Optional[str]:
+    """Return 'en' | 'hi' | 'mr' if `text` is a language-switch command, else None.
+
+    Requires BOTH a switch-intent cue and a language name so casual mentions of a
+    language don't change the conversation language. Switch commands are short, so
+    long messages are skipped cheaply."""
+    if not text:
+        return None
+    t = text.strip()
+    if len(t) > 120:
+        return None
+    if not _LANG_SWITCH_INTENT.search(t):
+        return None
+    # Check Marathi/Hindi before English so "switch from Hindi to Marathi" → mr.
+    for lang in ("mr", "hi", "en"):
+        if _LANG_NAME_PATTERNS[lang].search(t):
+            return lang
+    return None
+
 
 def _save_camera_image(img_base64: str, session_id: str) -> Optional[str]:
 
@@ -382,6 +446,21 @@ class ChatService:
 
         yield {"_activity": {"event": "query_detected", "message": user_message}}
 
+        # --- Conversation language switch (manual mode) — runs FIRST ---
+        # "speak in Marathi" / "Marathi mein baat karo" / "मराठीत बोल" etc. Sets the
+        # session language (persists for the whole conversation), confirms in the
+        # target language, and skips brain routing. Setting the metadata BEFORE
+        # yielding means the confirmation is itself spoken in the new voice.
+        _lang_switch = match_language_command(user_message)
+        if _lang_switch:
+            self.set_session_metadata(session_id, "conversation_lang", _lang_switch)
+            _resp = _LANG_CONFIRMATIONS[_lang_switch]
+            self.sessions[session_id][-1].content = _resp
+            logger.info("[LANG] Session %s → %s", session_id[:12], _lang_switch)
+            yield _resp
+            self.save_chat_session(session_id)
+            return
+
         from app.services import quiz_service as _qs
         from app.services import lecture_service as _ls
 
@@ -653,6 +732,15 @@ class ChatService:
             ]
             yield {"_activity": {"event": "context_retrieved", "message": "Video transcript loaded into context"}}
 
+        # Merge the active conversation-language directive (manual mode) into the
+        # extra system parts so the general/realtime/mixed LLM routes always reply
+        # in the selected language. Stays None when no language has been chosen.
+        _conv_lang = self.get_session_metadata(session_id, "conversation_lang")
+        _extra_parts = list(_video_ctx_parts) if _video_ctx_parts else []
+        if _conv_lang in _LANG_DIRECTIVES:
+            _extra_parts.append(_LANG_DIRECTIVES[_conv_lang])
+        _extra_parts = _extra_parts or None
+
         if category == CATEGORY_CAMERA:
             yield {"_activity": {"event": "routing", "route": "camera"}}
 
@@ -771,7 +859,7 @@ class ChatService:
                 try:
                     for chunk in stream_svc.stream_response(
                         question=user_message, chat_history=chat_history, key_start_index=chat_idx,
-                        extra_system_parts=_video_ctx_parts,
+                        extra_system_parts=_extra_parts,
                     ):
                     
                         if isinstance(chunk, dict):
@@ -840,7 +928,7 @@ class ChatService:
         try:
             for chunk in stream_svc.stream_response(
                 question=user_message, chat_history=chat_history, key_start_index=chat_idx,
-                extra_system_parts=_video_ctx_parts,
+                extra_system_parts=_extra_parts,
             ):
 
                 if isinstance(chunk, dict):

@@ -293,6 +293,24 @@ def check_tts(base):
     return "PASS", f"{len(r.content)} bytes"
 
 
+@check("Language switch (manual mode)")
+def check_language_switch(base):
+    # Deterministic: the switch confirmation is a fixed Marathi string (not LLM-
+    # generated), so this validates matcher -> pre-brain shortcut -> Marathi TTS
+    # voice end-to-end without LLM flakiness. Uses a fresh session (no pollution).
+    events = stream_chat(base, "switch to Marathi", tts=True)
+    text = "".join(e.get("chunk", "") for e in events).strip()
+    # Assert the EXACT fixed confirmation prefix — only the pre-brain shortcut
+    # produces it. (An LLM reply that merely happens to be in Marathi/Devanagari
+    # would pass a loose "any Devanagari" check even if the shortcut silently broke.)
+    if not text.startswith("ठीक आहे"):
+        return "FAIL", f"shortcut not firing — got {text[:60]!r}"
+    audio = [e for e in events if e.get("audio")]
+    if not audio:
+        return "FAIL", "Marathi confirmation produced no TTS audio (Azure voice path)"
+    return "PASS", f"Marathi confirm + {len(audio)} audio chunk(s)"
+
+
 def check_lecture(base):
     """Returns (status, video_id, session_id) — video_id feeds the --full MCQ check."""
     t0 = time.perf_counter()
@@ -373,6 +391,12 @@ def check_quiz(base, video_id, session_id):
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
+    # Make stdout UTF-8 so non-ASCII check details (e.g. a Devanagari response in
+    # a FAIL message) never crash the run on a cp1252 Windows console.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="JARVIS pre-deploy smoke test")
     ap.add_argument("--base-url", default="http://localhost:8000")
     ap.add_argument("--prod", action="store_true", help=f"test {PROD_URL}")
@@ -395,6 +419,7 @@ def main():
     check_chat(base)
     check_chat_tts(base)
     check_tts(base)
+    check_language_switch(base)
     _, video_id, session_id = check_lecture(base)
     check_image(base, poll=args.full)
     if args.full:
