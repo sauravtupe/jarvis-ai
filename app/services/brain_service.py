@@ -24,6 +24,45 @@ ALL_TASK_TYPES: List[str] = [
 MAX_CONTEXT_TURNS = 6
 MAX_MESSAGE_PREVIEW = 600
 
+# --- Multilingual image generation (Issue 3) ---------------------------------
+# A Devanagari (Hindi/Marathi) image request = a "picture/photo" noun NEAR a
+# "make/draw" verb. Requiring BOTH keeps precision high — a passing mention of
+# "चित्र" in prose won't force image generation. Used as a deterministic safety net
+# so a non-English request still triggers generate_image even if the 8B LLM misses it.
+_HINDI_IMAGE_RE = re.compile(
+    r"(?:चित्र|चित्रं|तस्वीर|तसवीर|फोटो|फ़ोटो|प्रतिमा)\s*\S{0,10}\s*"
+    r"(?:बना|बनाओ|बनाइए|बना\s*दो|तयार|काढ|काढा|रेखाट|दाखव)|"
+    r"(?:बना|बनाओ|बनाइए|काढ|काढा|तयार\s*कर|रेखाट)\s*\S{0,10}\s*"
+    r"(?:चित्र|तस्वीर|फोटो|प्रतिमा)",
+)
+# Small fallback transliteration of common school subjects → English, used only when
+# an image prompt is still in Devanagari (the LLM primary path already emits English).
+# Intentionally NOT exhaustive — the LLM handles the long tail; this guarantees the
+# common cases (animals/objects) render even if the model mistranslates.
+_DEVANAGARI_SUBJECT_MAP = {
+    "मांजर": "cat", "बिल्ली": "cat",
+    "हत्ती": "elephant", "हाथी": "elephant",
+    "कुत्रा": "dog", "कुत्ता": "dog", "कुत्र": "dog",   # कुत्र = oblique stem (कुत्र्याचे)
+    "सिंह": "lion", "शेर": "lion",
+    "वाघ": "tiger", "बाघ": "tiger",
+    "गाय": "cow", "घोडा": "horse", "घोड़ा": "horse", "घोड": "horse",   # घोड = oblique stem (घोड्याचे)
+    "पक्षी": "bird", "चिमणी": "sparrow", "मासा": "fish", "मछली": "fish",
+    "झाड": "tree", "पेड़": "tree", "फूल": "flower", "फुल": "flower",
+    "सूर्य": "sun", "चंद्र": "moon", "चाँद": "moon",
+    "गाडी": "car", "गाड़ी": "car", "घर": "house",
+    "आंबा": "mango", "आम": "mango", "सफरचंद": "apple", "सेब": "apple",
+}
+_DEVANAGARI_SUBJECT_SORTED = sorted(_DEVANAGARI_SUBJECT_MAP.items(), key=lambda kv: -len(kv[0]))
+# Devanagari "make a picture of" scaffolding to strip when the subject is unknown,
+# leaving a bare (possibly Devanagari) subject for Pollinations' best effort.
+_HINDI_IMAGE_SCAFFOLD_RE = re.compile(
+    r"चित्रं|चित्र|तस्वीर|तसवीर|फ़ोटो|फोटो|प्रतिमा|"
+    r"बनाओ|बनाइए|बना\s*दो|बना|काढून|काढा|काढ|रेखाटा|रेखाट|"
+    r"तयार\s*कर|तयार|दाखवा|दाखव|करा|कर|दो|"
+    r"च्या|चे|चा|ची|चं|का|की|के|को|एक|"
+    r"जार्विस|जारवीस|जॉर्विस"
+)
+
 _PRIMARY_BRAIN_PROMPT = """You are the decision-maker for JARVIS. Classify the user's message into EXACTLY ONE category.
 
 === CATEGORIES ===
@@ -128,6 +167,12 @@ For multiple tasks, separate with commas: task_type1 query1, task_type2 query2
    "Can you make me a picture of Iron Man" → generate_image Iron Man
    "Create an image of a futuristic city" → generate_image futuristic city
    "Make a logo for my brand" → generate_image logo design
+   Image requests may be in Hindi or Marathi (चित्र / तस्वीर / फोटो = picture; बनाओ / बना दो / तयार कर / काढ = make/draw):
+   "मांजराचे चित्र तयार कर" → generate_image a cat
+   "हत्तीचे चित्र काढ" → generate_image an elephant
+   "बिल्ली की तस्वीर बनाओ" → generate_image a cat
+   "हाथी की तस्वीर बनाओ" → generate_image an elephant
+   IMPORTANT: ALWAYS write the image prompt in ENGLISH — translate the subject if the request is in Hindi/Marathi.
    IMPORTANT: The prompt should be DESCRIPTIVE. Keep the full visual description, add detail if user was vague.
 
 -> 'content (topic)' — Write content (essay, poem, letter, code, email, etc.)
@@ -208,6 +253,11 @@ class BrainService:
             _PRIMARY_BRAIN_PROMPT, user_content, key_index, ALL_CATEGORIES, "general"
         )
 
+        # Deterministic safety net: a clear Devanagari (Hindi/Marathi) image request
+        # must be a task, even if the 8B model misrouted it to general/realtime.
+        if category not in ("task", "mixed") and _HINDI_IMAGE_RE.search(msg):
+            category, method = "task", f"{method}+hi-img"
+
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         logger.info("[BRAIN-PRIMARY] %s -> %s (%d ms, %s)", msg[:50], category, elapsed_ms, method)
         return (category, method, elapsed_ms)
@@ -227,6 +277,9 @@ class BrainService:
         ("draw me a beautiful sunset over the ocean", "generate_image beautiful sunset over the ocean"),
         ("can you make a picture of a dragon breathing fire", "generate_image dragon breathing fire"),
         ("create an image of a futuristic city at night", "generate_image futuristic city at night"),
+        ("मांजराचे चित्र तयार कर", "generate_image a cat"),
+        ("हत्तीचे चित्र काढ", "generate_image an elephant"),
+        ("बिल्ली की तस्वीर बनाओ", "generate_image a cat"),
         ("write me a poem about the stars", "content poem about the stars"),
         ("open webcam", "open_webcam"),
         ("turn off the camera", "close_webcam"),
@@ -274,6 +327,11 @@ class BrainService:
             _TASK_BRAIN_PROMPT, user_content, key_index)
 
         decisions = self._parse_task_decisions(raw_response)
+        # Safety net: guarantee a generate_image decision for a Devanagari image request
+        # even if the 8B model missed/misrouted it. English requests already handled by
+        # the LLM. _finalize_image_prompt translates the subject to English for Pollinations.
+        if _HINDI_IMAGE_RE.search(msg) and not any(d[0] == "generate_image" for d in decisions):
+            decisions.append(("generate_image", self._finalize_image_prompt(msg)))
         self._last_task_decisions = decisions
         task_types = [d[0] for d in decisions]
 
@@ -319,7 +377,7 @@ class BrainService:
                 elif task_type in ("google_search", "youtube_search"):
                     payload["query"] = clean_query or user_message
                 elif task_type == "generate_image":
-                    payload["prompt"] = clean_query or user_message
+                    payload["prompt"] = self._finalize_image_prompt(clean_query or user_message)
                 elif task_type == "content":
                     payload["prompt"] = clean_query or user_message
                 intents.append((intent_key, payload))
@@ -856,6 +914,22 @@ Classify. Output EXACTLY ONE category name."""
 
         return cleaned.strip()
 
+    def _finalize_image_prompt(self, text: str) -> str:
+        """Make an image prompt Pollinations-friendly. Translate a known Hindi/Marathi
+        subject to English; else strip Devanagari 'make a picture of' scaffolding so a
+        bare subject remains. English prompts pass through unchanged."""
+        t = (text or "").strip()
+        if not t:
+            return t
+        for deva, eng in _DEVANAGARI_SUBJECT_SORTED:
+            if deva in t:
+                return f"{'an' if eng[:1] in 'aeiou' else 'a'} {eng}"
+        if re.search(r"[ऀ-ॿ]", t):   # still contains Devanagari
+            stripped = _HINDI_IMAGE_SCAFFOLD_RE.sub(" ", t)
+            stripped = re.sub(r"\s+", " ", stripped).strip(" .,!?।")
+            return stripped or t
+        return t
+
     def _extract_image_prompt(self, msg: str) -> str:
 
         m, lower = msg.strip(), msg.lower()
@@ -871,8 +945,8 @@ Classify. Output EXACTLY ONE category name."""
                 break
 
         if not extracted:
-            return m
-        
+            return self._finalize_image_prompt(m)
+
         boundaries = [
             r"\s+and\s+write\s", r"\s+and\s+open\s", r"\s+and\s+generate\s",
             r"\s+and\s+draw\s", r"\s+and\s+play\s", r"\s+and\s+search\s",
@@ -886,7 +960,7 @@ Classify. Output EXACTLY ONE category name."""
                 extracted = extracted[:match.start()].strip().rstrip(".!?,")
                 break
 
-        return extracted.strip() if extracted.strip() else m
+        return self._finalize_image_prompt(extracted.strip() if extracted.strip() else m)
 
     def _extract_search_query(self, msg: str) -> str:
 

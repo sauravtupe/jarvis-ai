@@ -41,6 +41,22 @@ let orb = null;
 let pendingAttachment = null; // { upload_id, filename, content_type, extracted_text }
 let _attachmentInFlight = false; // true while processing a message that included an upload
 let pendingYouTube = null;   // { video_id, url }
+let _postVideoOffered = false;   // gate: auto-offer the post-video choice card once per video
+
+// Returning to THIS tab after a lecture video opened in a new tab IS the "I'm done
+// watching" signal (the video plays in a separate tab, so coming back means you want
+// to talk to Jarvis again). Auto-offer the MCQ / summary / practice / notes choice
+// card instead of depending on the user speaking "done" — far more reliable than STT,
+// especially in Hindi/Marathi mode. Reuses the normal backend flow: sends a return
+// signal → backend checks transcript readiness → yields the choice card (or a friendly
+// "still processing" / "failed" message). Gated once per video so an incidental tab
+// switch can't re-offer. Called from voice.js _resumeVoiceOnReturn().
+function _offerPostVideoChoices() {
+    if (_postVideoOffered || isStreaming) return;
+    if (!pendingYouTube || !pendingYouTube.video_id) return;
+    _postVideoOffered = true;
+    sendMessage('done');
+}
 let currentQuiz = null;      // { questions[], currentIdx, score, contentEl }
 let recognition = null;
 let ttsPlayer = null;
@@ -1439,6 +1455,7 @@ async function sendMessage(textOverride) {
                     }
                     if (data.youtube_detected) {
                         pendingYouTube = { video_id: data.youtube_detected.video_id, url: data.youtube_detected.url };
+                        _postVideoOffered = false;   // new video → re-arm the auto-offer on next tab return
                         // Pause speech recognition — the video's audio leaks through the speakers
                         // and the mic would otherwise transcribe it as user input (loop).
                         _enterVideoWatchMode();

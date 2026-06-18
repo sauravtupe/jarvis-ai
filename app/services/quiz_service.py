@@ -28,7 +28,18 @@ _DONE_PATTERN = re.compile(
     r'seen it|watched it|i finished|video done|video finished|'
     r'yes done|yeah done|complete|i\'m ready|i am ready|'
     r'lets go|let\'s go|yes jarvis|ok jarvis|okay jarvis|'
-    r'i\'ve watched|i have watched|i\'ve seen|i have seen)\b',
+    r'i\'ve watched|i have watched|i\'ve seen|i have seen|'
+    # romanized Hindi/Marathi completion words (spoken/typed in en-IN mode)
+    r'ho gaya|hogaya|khatam|dekh liya|dekhliya|'
+    r'jhaale|zhaale|zaale|sampale|baghitle|paahile)\b'
+    # Devanagari completion words for hi-IN / mr-IN mode — un-anchored, because
+    # Python \b is ASCII-only and won't match around Devanagari (same convention as
+    # lecture_service._HINDI_KEYWORDS). Substring search, so base words suffice
+    # ("पूर्ण झाले" already matches via "झाले"/"पूर्ण").
+    # Hindi: हो गया / पूरा हो गया / खत्म / देख लिया / पूरा / ठीक है
+    # Marathi: झाले(ं) / पूर्ण झाले / संपले(ं) / पाहिले(ं) / बघितले(ं) / पूर्ण
+    r'|(हो गया|पूरा|खत्म|देख लिया|देख ली|ठीक है|'
+    r'झाले|झालं|पूर्ण|संपले|संपलं|पाहिले|पाहिलं|बघितले|बघितलं)',
     re.IGNORECASE,
 )
 

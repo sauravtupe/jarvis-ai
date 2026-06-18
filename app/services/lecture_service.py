@@ -398,23 +398,38 @@ _HINDI_KEYWORDS = [
     (r"क्लास", "class"),
     (r"कक्षा", "class"),
     (r"काक्षा", "class"),
+    (r"इयत्ता", "class"),          # Marathi: इयत्ता = standard/class
     (r"\bkakshya\b", "class"),
     (r"\bkaksha\b", "class"),
+    (r"\biyatta\b", "class"),
     # chapter words
     (r"चैप्टर", "chapter"),
+    (r"चॅप्टर", "chapter"),         # Marathi spelling of "chapter" (ॅ, not Hindi's ै)
     (r"अध्याय", "chapter"),
     (r"पाठ", "chapter"),
+    (r"धडा", "chapter"),            # Marathi: धडा = lesson
     (r"\badhyay\b", "chapter"),
     (r"\bpaath\b", "chapter"),
-    # verbs (we strip them — the gate doesn't require a verb)
+    (r"\bdhada\b", "chapter"),
+    # verbs (we strip them — the gate doesn't require a verb). LONGER/more-specific
+    # spellings MUST precede shorter ones (खोलो before खोल, दिखाओ before दिखा) so the
+    # short pattern doesn't half-replace the long one. Replacements are Devanagari→Latin,
+    # so once mapped they can't be re-matched by a later Devanagari pattern.
     (r"खोलो", "open"),
     (r"चलाओ", "play"),
     (r"शुरू", "start"),
     (r"दिखाओ", "show"),
+    (r"खोल", "open"),              # Hindi: खोल / खोल दो (खोलो already handled above)
+    (r"उघड", "open"),              # Marathi: उघड / उघडा = open
+    (r"दाखव", "show"),             # Marathi: दाखव / दाखवा = show
+    (r"सुरू", "start"),            # Marathi: सुरू (स, vs Hindi's शुरू)
+    (r"दिखा", "show"),             # Hindi: दिखा / दिखा दो (दिखाओ already handled above)
     (r"\bkholo\b", "open"),
     (r"\bchalao\b", "play"),
     (r"\bshuru\b", "start"),
     (r"\bdikhao\b", "show"),
+    (r"\bughad\b", "open"),
+    (r"\bdaakhav\b", "show"),
     (r"\bkaro\b", ""),  # "open karo" -> "open"
 ]
 

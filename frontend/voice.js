@@ -116,6 +116,11 @@ function _resumeVoiceOnReturn() {
     recognition = null;
     initSpeech();
     _exitVideoWatchMode();
+    // Coming back to this tab IS the "done watching" signal — auto-offer the post-video
+    // choice card (MCQ/summary/practice/notes) so the student never has to say "done"
+    // for the quiz to appear. Gated once per video inside the helper. Reliable across
+    // English/Hindi/Marathi because it doesn't depend on recognizing a spoken phrase.
+    if (typeof _offerPostVideoChoices === 'function') _offerPostVideoChoices();
 }
 if (typeof document !== 'undefined' && document.addEventListener) {
     document.addEventListener('visibilitychange', () => {
@@ -160,7 +165,13 @@ const WAKE_ACTIVE_WINDOW_MS = 1800000;  // 30 min
 // "Jarvis" constantly, so we accept a broad set of look-alikes/sound-alikes —
 // recall matters more than precision here (a stray match just opens the command
 // window). Add more variants here if a real misread keeps slipping through.
-const _WAKE_WORD_RE = /\b(jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b/i;
+// Two alternations: (1) Latin variants, \b-anchored as usual; (2) Devanagari
+// renderings the hi-IN / mr-IN recognizer returns once the conversation language
+// is switched — these MUST stay un-anchored because JS \b is ASCII-only (it asserts
+// a \w/\W transition and never matches around all-non-word Devanagari, so a
+// \b-wrapped Devanagari variant would never fire). _matchWakeWord uses m[0]/m.index,
+// which work for either branch.
+const _WAKE_WORD_RE = /\b(jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b|(जार्विस|जार्वीस|जारविस|जारवीस|जॉर्विस|जर्विस|जर्व्हिस|जाविस|जरविस|जार्व्हिस)/i;
 
 // ─── Manual conversation-language → Web Speech recognizer tag ────────────────
 // The user can switch the conversation language by voice/text ("speak in Marathi",
