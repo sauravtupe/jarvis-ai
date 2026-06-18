@@ -162,6 +162,43 @@ const WAKE_ACTIVE_WINDOW_MS = 1800000;  // 30 min
 // window). Add more variants here if a real misread keeps slipping through.
 const _WAKE_WORD_RE = /\b(jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b/i;
 
+// ─── Manual conversation-language → Web Speech recognizer tag ────────────────
+// The user can switch the conversation language by voice/text ("speak in Marathi",
+// "हिंदी में बात करो", "मराठीत बोल"). The backend (app/services/chat_service.py
+// match_language_command) sets the LLM reply + Azure TTS voice; here we mirror the
+// SAME detection so the mic listens in the matching language. recognition.lang only
+// applies on the next start(); sendMessage already stops the mic for the send, and
+// the post-reply/TTS re-arm starts it in the new language — so we just update state.
+// Keep this matcher in sync with chat_service.match_language_command.
+const _LANG_TO_RECO = { en: 'en-IN', hi: 'hi-IN', mr: 'mr-IN' };
+const _LANG_NAME_RE = {
+    en: /english|इंग्लिश|इंग्रजी|अंग्रेज़ी|अंग्रेजी/i,
+    hi: /hindi|हिंदी|हिन्दी/i,
+    mr: /marathi|मराठी/i,
+};
+const _LANG_SWITCH_INTENT_RE = /speak|talk|switch|reply|respond|answer|converse|change|baat\s*kar|बात\s*कर|बोल|मध्ये|में\s*बात/i;
+let conversationRecoLang = 'en-IN';   // default = today's exact behavior
+
+function _matchLanguageCommand(text) {
+    if (!text) return null;
+    const t = text.trim();
+    if (t.length > 120) return null;
+    if (!_LANG_SWITCH_INTENT_RE.test(t)) return null;
+    for (const lang of ['mr', 'hi', 'en']) {       // mr before hi (both Devanagari)
+        if (_LANG_NAME_RE[lang].test(t)) return lang;
+    }
+    return null;
+}
+
+function maybeSwitchRecognitionLang(text) {
+    const lang = _matchLanguageCommand(text);
+    if (!lang) return;
+    const tag = _LANG_TO_RECO[lang];
+    if (!tag || tag === conversationRecoLang) return;
+    conversationRecoLang = tag;
+    if (recognition) recognition.lang = tag;
+}
+
 function _matchWakeWord(text) {
     if (!text) return null;
     const m = _WAKE_WORD_RE.exec(text);
@@ -393,7 +430,7 @@ function initSpeech() {
     recognition.continuous = true;
     recognition.interimResults = !safariMode;
     recognition.maxAlternatives = 5;  // more guesses for the wake-word scanner to find "Jarvis" in
-    recognition.lang = 'en-IN';
+    recognition.lang = conversationRecoLang;   // en-IN by default; tracks manual language switch
     // Liveness stamps — any event from the engine proves it's alive (see
     // _lastSpeechEvidence). audiostart/soundstart fire even without speech.
     recognition.onaudiostart = () => { _lastSpeechEvidence = Date.now(); };

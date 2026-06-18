@@ -1306,6 +1306,8 @@ async function sendMessage(textOverride) {
         if (messageInput) messageInput.value = '';
         return;
     }
+    // Couple the mic language to the manual conversation-language switch (voice + typed).
+    if (typeof maybeSwitchRecognitionLang === 'function') maybeSwitchRecognitionLang(text);
     const visionModeOn = camVisionModeInput && camVisionModeInput.checked;
     const hasAttachment = !!pendingAttachment;
     const wantsCamera = !hasAttachment && (visionModeOn || isCameraQuery(text) || (camStream && text));
