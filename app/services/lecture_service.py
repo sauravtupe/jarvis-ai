@@ -405,6 +405,9 @@ _HINDI_KEYWORDS = [
     # chapter words
     (r"चैप्टर", "chapter"),
     (r"चॅप्टर", "chapter"),         # Marathi spelling of "chapter" (ॅ, not Hindi's ै)
+    (r"चाप्टर", "chapter"),
+    (r"चेप्टर", "chapter"),
+    (r"चाएर", "chapter"),           # real mr-IN mis-hear of spoken "chapter" (captured)
     (r"अध्याय", "chapter"),
     (r"पाठ", "chapter"),
     (r"धडा", "chapter"),            # Marathi: धडा = lesson
@@ -424,6 +427,10 @@ _HINDI_KEYWORDS = [
     (r"दाखव", "show"),             # Marathi: दाखव / दाखवा = show
     (r"सुरू", "start"),            # Marathi: सुरू (स, vs Hindi's शुरू)
     (r"दिखा", "show"),             # Hindi: दिखा / दिखा दो (दिखाओ already handled above)
+    # Transliterated ENGLISH — when mostly speaking Hindi/Marathi, users say the
+    # English command word and the mr-IN/hi-IN engine writes it in Devanagari.
+    (r"ओपन", "open"),              # English "open" → ओपन
+    (r"प्ले", "play"),             # English "play" → प्ले
     (r"\bkholo\b", "open"),
     (r"\bchalao\b", "play"),
     (r"\bshuru\b", "start"),
@@ -436,6 +443,24 @@ _HINDI_KEYWORDS = [
 # Devanagari digit -> ASCII digit
 _DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
+# Devanagari number-WORDS -> ASCII digit (1-12 covers all class/chapter numbers).
+# Critical: when a user speaks a number in English ("one") in hi-IN/mr-IN mode the
+# engine returns the Devanagari WORD (वन), not a digit — so digit translation alone
+# misses it. Covers transliterated English (वन/टू…) + native Hindi + native Marathi.
+# Applied longest-key-first so multi-syllable forms (दोन) win over short ones (दो).
+_DEVANAGARI_NUMWORDS = {
+    # transliterated English numbers
+    "वन": "1", "टू": "2", "थ्री": "3", "फोर": "4", "फाइव": "5", "सिक्स": "6",
+    "सेवन": "7", "एट": "8", "नाइन": "9", "टेन": "10",
+    "इलेव्हन": "11", "इलेवन": "11", "ट्वेल्व": "12", "ट्वेल": "12",
+    # native Hindi
+    "एक": "1", "दो": "2", "तीन": "3", "चार": "4", "पांच": "5", "छह": "6", "छे": "6",
+    "सात": "7", "आठ": "8", "नौ": "9", "दस": "10", "ग्यारह": "11", "बारह": "12",
+    # native Marathi (where it differs from Hindi)
+    "दोन": "2", "पाच": "5", "सहा": "6", "नऊ": "9", "दहा": "10", "अकरा": "11", "बारा": "12",
+}
+_DEVANAGARI_NUMWORDS_SORTED = sorted(_DEVANAGARI_NUMWORDS.items(), key=lambda kv: -len(kv[0]))
+
 
 def _normalize_devanagari_digits(text: str) -> str:
     return (text or "").translate(_DEVANAGARI_DIGITS)
@@ -445,7 +470,11 @@ def _normalize_hindi_keywords(text: str) -> str:
     out = _normalize_devanagari_digits(text or "")
     for pattern, replacement in _HINDI_KEYWORDS:
         out = re.sub(pattern, replacement, out, flags=re.IGNORECASE)
-    return out
+    # Number-words AFTER keyword replacement (so "class वन chapter" -> "class 1 chapter").
+    # Pad with spaces then collapse, so a digit never glues to adjacent text.
+    for word, digit in _DEVANAGARI_NUMWORDS_SORTED:
+        out = re.sub(re.escape(word), f" {digit} ", out)
+    return re.sub(r"\s+", " ", out).strip()
 
 
 # Ordinal + number-word normalisation (scoped "first chapter" → "1 chapter" and

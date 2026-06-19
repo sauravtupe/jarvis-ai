@@ -171,7 +171,7 @@ const WAKE_ACTIVE_WINDOW_MS = 1800000;  // 30 min
 // a \w/\W transition and never matches around all-non-word Devanagari, so a
 // \b-wrapped Devanagari variant would never fire). _matchWakeWord uses m[0]/m.index,
 // which work for either branch.
-const _WAKE_WORD_RE = /\b(jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b|(जार्विस|जार्वीस|जारविस|जारवीस|जॉर्विस|जर्विस|जर्व्हिस|जाविस|जरविस|जार्व्हिस)/i;
+const _WAKE_WORD_RE = /\b(jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b|(जार्विस|जार्वीस|जारविस|जारवीस|जॉर्विस|जर्विस|जर्व्हिस|जाविस|जरविस|जार्व्हिस|जरबेस|जारबेस|जरबीस|जरवेस|जरबस|जर्बेस)/i;
 
 // ─── Manual conversation-language → Web Speech recognizer tag ────────────────
 // The user can switch the conversation language by voice/text ("speak in Marathi",
@@ -480,6 +480,10 @@ function initSpeech() {
         let transcript = '';
         for (const a of alts) { if (a.length > transcript.length) transcript = a; }
         const isFinal = last && last.isFinal;
+        // Capture what the recognizer ACTUALLY returns (esp. Devanagari mis-hears in
+        // hi-IN/mr-IN mode like जरबेस / चाएर) so multilingual matchers can be hardened
+        // against real transcripts instead of guesses. Final results only, one line.
+        if (isFinal && alts.length) console.log('[VOICE-RAW]', recognition.lang, JSON.stringify(alts));
 
         // === Wake-word PASSIVE mode ===
         // Only act on results that contain "Jarvis". Everything else is silent
