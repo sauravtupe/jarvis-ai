@@ -171,7 +171,15 @@ const WAKE_ACTIVE_WINDOW_MS = 1800000;  // 30 min
 // a \w/\W transition and never matches around all-non-word Devanagari, so a
 // \b-wrapped Devanagari variant would never fire). _matchWakeWord uses m[0]/m.index,
 // which work for either branch.
-const _WAKE_WORD_RE = /\b(jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b|(जार्विस|जार्वीस|जारविस|जारवीस|जॉर्विस|जर्विस|जर्व्हिस|जाविस|जरविस|जार्व्हिस|जरबेस|जारबेस|जरबीस|जरवेस|जरबस|जर्बेस)/i;
+// Also accepts generic ACTIVATION PHRASES ("wake up", "wake", "listen") and their
+// Hindi/Marathi equivalents (सुनो/उठो/जागो/ऐका…), so the user can start a session even
+// when the engine mangles the name. In hi-IN/mr-IN mode a spoken English phrase comes
+// back transliterated (wake up → वेक अप, listen → लिसन), so those Devanagari forms are
+// included too. Multi-word/longer variants are listed BEFORE shorter ones (wake up
+// before wake) so the longer phrase wins. Trade-off: "listen"/"wake"/short native words
+// are commoner than "jarvis", so wake is slightly more eager — a stray wake only opens
+// the (harmless) command window.
+const _WAKE_WORD_RE = /\b(wake up|wake|listen|char bees|char bis|charbees|charbis|chalbis|charbis|suno|suniye|utho|jaago|jago|aika|aiko|jarvis|jarviss|jarvis's|jarvi|jarviz|jarvice|jarvees|javis|javies|javiss|jervis|jervice|jarwis|jarwiss|jaravis|jarvas|jaris|jarius|travis|charvis|harvis|garvis|marvis|narvis|sarvis|darvis|larvis|yarvis|service)\b|(वेक अप|वेकअप|वेक|लिसन|लिस्न|लिशन|चार बीस|चारबीस|चलबीस|चारबिस|चलबिस|सुनिए|सुनो|सुन|ऐका|ऐक|उठो|उठ|जागो|जागा|जाग|जार्विस|जार्वीस|जारविस|जारवीस|जॉर्विस|जर्विस|जर्व्हिस|जाविस|जरविस|जार्व्हिस|जरबेस|जारबेस|जरबीस|जरवेस|जरबस|जर्बेस)/i;
 
 // ─── Manual conversation-language → Web Speech recognizer tag ────────────────
 // The user can switch the conversation language by voice/text ("speak in Marathi",
