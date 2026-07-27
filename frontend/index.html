@@ -63,6 +63,7 @@
                         <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
                     </svg>
                 </button>
+                <button class="division-pill" id="division-pill" title="Active classroom" style="display:none">🏫 Select classroom</button>
                 <button class="btn-icon settings-btn" id="settings-btn" title="Settings">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -272,6 +273,7 @@
             </div>
             <div class="lectures-body">
                 <button class="btn-primary lectures-add-btn" id="lectures-add-btn">+ Add Lecture</button>
+                <button class="btn-secondary lectures-classrooms-btn" id="classrooms-btn" title="Manage Schools, Classes & Divisions (admin only)">&#127979; Manage Classrooms</button>
                 <button class="btn-secondary lectures-errors-btn" id="lectures-errors-btn" title="Recent backend + frontend errors (owner only)">&#9888; Recent Errors</button>
 
                 <!-- Recent errors viewer (admin only, hidden until opened) -->
@@ -314,6 +316,29 @@
                 <div class="lectures-list" id="lectures-list">
                     <p class="lectures-empty" id="lectures-empty">No lectures yet. Click "+ Add Lecture" to add one.</p>
                 </div>
+            </div>
+        </div>
+
+        <!-- Classrooms management drawer (AI Teacher Phase 1) — School -> Class -> Division -->
+        <div class="lectures-panel classrooms-panel glass-panel" id="classrooms-panel" aria-hidden="true">
+            <div class="lectures-header">
+                <button class="lectures-close btn-icon" id="classrooms-back" title="Back to lectures" aria-label="Back">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <h3 class="lectures-title">Manage Classrooms</h3>
+                <button class="lectures-close btn-icon" id="classrooms-close" title="Close" aria-label="Close classrooms">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="lectures-body">
+                <div class="cr-add-school">
+                    <input type="text" id="cr-school-name" maxlength="120" placeholder="School name">
+                    <input type="text" id="cr-school-board" maxlength="120" placeholder="Board (optional)">
+                    <input type="text" id="cr-school-city" maxlength="120" placeholder="City (optional)">
+                    <button class="btn-primary" id="cr-add-school-btn">+ Add School</button>
+                </div>
+                <p class="lecture-form-error" id="cr-error" style="display:none"></p>
+                <div id="classrooms-tree" class="cr-tree"><p class="lectures-empty">Loading…</p></div>
             </div>
         </div>
 
@@ -454,7 +479,35 @@
                 <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/><path fill="none" d="M0 0h48v48H0z"/></svg>
                 Sign in with Google
             </button>
+            <button id="guest-test-btn" class="btn-secondary" style="margin-top:12px;width:100%">
+                Continue without signing in (Test mode)
+            </button>
             <p class="login-note">Your data stays private and secure</p>
+        </div>
+    </div>
+
+    <!-- Classroom selection — AI Teacher Phase 1 (School -> Class -> Division) -->
+    <div id="division-overlay">
+        <div class="login-card glass-panel">
+            <div class="login-logo">Select Classroom</div>
+            <div class="login-subtitle">Choose the class you're teaching</div>
+            <div id="division-picker-body">
+                <label class="dz-label">School
+                    <select id="dz-school"><option value="">— Select school —</option></select>
+                </label>
+                <label class="dz-label">Class
+                    <select id="dz-class" disabled><option value="">— Select class —</option></select>
+                </label>
+                <label class="dz-label">Division
+                    <select id="dz-division" disabled><option value="">— Select division —</option></select>
+                </label>
+            </div>
+            <div id="division-empty" class="dz-empty" style="display:none">
+                No classrooms set up yet. Open the <strong>Admin panel</strong> to add a
+                School → Class → Division, then choose it here.
+            </div>
+            <button id="dz-start-btn" class="google-btn" style="margin-top:20px" disabled>Start Class</button>
+            <button id="dz-skip-btn" class="btn-secondary" style="margin-top:12px;width:100%">Skip for now</button>
         </div>
     </div>
     <script src="orb.js?v=20260524l"></script>
@@ -462,6 +515,7 @@
     <script src="tts.js?v=20260616a"></script>
     <script src="voice.js?v=20260618a"></script>
     <script src="auth.js?v=20260616c"></script>
+    <script src="school.js?v=20260622a"></script>
     <script src="learning.js?v=20260617f"></script>
     <script src="admin.js?v=20260616e"></script>
     <script src="media.js?v=20260617f"></script>

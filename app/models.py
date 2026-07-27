@@ -10,6 +10,9 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     tts: bool = False
     imgbase64: Optional[str] = None
+    # AI Teacher Phase 1 — the active classroom (School->Class->Division). When set,
+    # the teacher persona speaks the division's preferred language automatically.
+    division_id: Optional[str] = Field(default=None, max_length=64)
 
 class ChatResponse(BaseModel):
     response: str
@@ -207,3 +210,20 @@ class NotesRecord(BaseModel):
     notes_type: str = "link"   # slides | pdf | ppt | doc | link
     notes_added_at: str = ""
     title: str = ""
+
+
+# AI Teacher Phase 1 — School -> Class -> Division identity
+class SchoolCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    board: str = Field(default="", max_length=120)
+    city: str = Field(default="", max_length=120)
+
+
+class ClassCreate(BaseModel):
+    # Accepts "UKG" or "1".."12" (the service also tolerates "class_5" / "5th").
+    grade: str = Field(..., min_length=1, max_length=10)
+
+
+class DivisionCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=20)
+    preferred_language: str = Field(default="en", max_length=2)

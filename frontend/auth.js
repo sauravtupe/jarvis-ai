@@ -8,6 +8,7 @@
 
 // ==================== AUTH (Feature 7) ====================
 const _AUTH_TOKEN_KEY = 'jarvis_auth_token';
+const _GUEST_MODE_KEY = 'jarvis_guest_mode';   // "Continue without signing in (Test mode)"
 let _authToken = null;
 let _supabaseClient = null;
 
@@ -79,15 +80,39 @@ async function _initAuth() {
         console.warn('[AUTH] Could not load Supabase config', e);
     }
 
+    let _guest = false;
+    try { _guest = localStorage.getItem(_GUEST_MODE_KEY) === '1'; } catch {}
+
     if (_authToken) {
         _hideLoginOverlay();
         _showUserPill(_authToken);
-    } else if (!_supabaseConfigured) {
-        // Supabase not configured — bypass login (uses test-user-001 placeholder until Feature 7)
+        _notifyAuthResolved();
+    } else if (!_supabaseConfigured || _guest) {
+        // Supabase not configured OR user chose Test mode — bypass login
+        // (uses test-user-001 placeholder until Feature 7 / real auth lands).
         _hideLoginOverlay();
+        _notifyAuthResolved();
     } else {
         _showLoginOverlay();
     }
+}
+
+// Bridge to school.js (AI Teacher Phase 1) — render the classroom pill and prompt
+// the picker once the user is past the login gate. Guarded so auth still works if
+// school.js isn't loaded.
+function _notifyAuthResolved() {
+    if (typeof _onAuthResolved === 'function') {
+        try { _onAuthResolved(); } catch (e) { console.warn('[AUTH] _onAuthResolved failed', e); }
+    }
+}
+
+// "Continue without signing in (Test mode)" — dismiss the gate and remember it so
+// the user isn't asked again every reload while building/testing locally. Reversible
+// via _signOut() (which clears the flag and re-shows the login).
+function _continueAsGuest() {
+    try { localStorage.setItem(_GUEST_MODE_KEY, '1'); } catch {}
+    _hideLoginOverlay();
+    _notifyAuthResolved();
 }
 
 async function _signInWithGoogle() {
@@ -105,6 +130,7 @@ async function _signInWithGoogle() {
 function _signOut() {
     _authToken = null;
     localStorage.removeItem(_AUTH_TOKEN_KEY);
+    try { localStorage.removeItem(_GUEST_MODE_KEY); } catch {}
     if (_supabaseClient) _supabaseClient.auth.signOut().catch(() => {});
     const pill = $('user-pill');
     if (pill) pill.style.display = 'none';
@@ -115,6 +141,8 @@ function _signOut() {
 function _initAuthUI() {
     const googleBtn = $('google-signin-btn');
     if (googleBtn) googleBtn.addEventListener('click', _signInWithGoogle);
+    const guestBtn = $('guest-test-btn');
+    if (guestBtn) guestBtn.addEventListener('click', _continueAsGuest);
     const logoutBtn = $('logout-btn');
     if (logoutBtn) logoutBtn.addEventListener('click', _signOut);
 }

@@ -13,9 +13,20 @@ database/chats_data/
 database/camera_captures/
 database/lectures.json
 database/quizzes/records.json
+# AI Teacher runtime data — restored from durable storage (S3/HF), like lectures.json
+database/schools.json
+database/division_progress.json
+database/division_doubts.json
 *.mp3
 *.wav
 server_stdout.txt
 server_stderr.txt
 JARVIS_AI/
 .claude/
+backups/
+# Local dev server logs / scratch
+_server_*.log
+_commitmsg.txt
+# Unrelated local artifacts (not part of the application)
+_maharaja_analysis/
+system-role.zip

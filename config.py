@@ -29,6 +29,18 @@ for _cls in PRACTICE_CLASSES:
 LECTURES_JSON_PATH = BASE_DIR / "database" / "lectures.json"
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
+# AI Teacher (Phase 1) — School -> Class -> Division identity store. JSON store,
+# managed via admin API, persisted to the same durable backend as lectures.json.
+SCHOOLS_JSON_PATH = BASE_DIR / "database" / "schools.json"
+
+# AI Teacher (Phase 2) — per-division curriculum progress (current chapter,
+# completions, revisions). Keyed by division_id, never by student.
+PROGRESS_JSON_PATH = BASE_DIR / "database" / "division_progress.json"
+
+# AI Teacher (Phase 3) — per-division doubts log (classroom questions raised, and
+# whether they've been resolved). Keyed by division_id, never by student.
+DOUBTS_JSON_PATH = BASE_DIR / "database" / "division_doubts.json"
+
 # ─── Security hardening ──────────────────────────────────────────────────────
 # CORS allowlist (CLAUDE.md rule #11). The frontend is served same-origin by
 # this app, so CORS only governs OTHER websites calling the API from a browser.
@@ -280,6 +292,12 @@ MAX_MESSAGE_LENGTH = 32_000
 ASSISTANT_NAME = (os.getenv("ASSISTANT_NAME", "").strip() or "Jarvis")
 JARVIS_USER_TITLE = os.getenv("JARVIS_USER_TITLE", "").strip()
 JARVIS_OWNER_NAME = os.getenv("JARVIS_OWNER_NAME", "").strip()
+
+# AI Teacher platform — Phase 0. When ON, Jarvis speaks as "Jarvis Teacher" (a warm human
+# school teacher) instead of a generic assistant. The teacher persona is injected as a
+# dominant system-prompt block in chat_service. Default ON (this is the classroom product);
+# set CLASSROOM_MODE=0 to restore the plain assistant persona.
+CLASSROOM_MODE = os.getenv("CLASSROOM_MODE", "1").strip().lower() in ("1", "true", "yes", "on")
 
 _JARVIS_SYSTEM_PROMPT_BASE = """You are {assistant_name}, a complete AI assistant. You help with information, tasks, and actions. Sharp, warm, a little witty. Keep language simple and natural.
 

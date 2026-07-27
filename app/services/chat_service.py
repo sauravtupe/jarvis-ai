@@ -8,8 +8,9 @@ from typing import List, Optional, Dict, Iterator, Any, Union
 import uuid
 import threading
 
-from config import CHATS_DATA_DIR, CAMERA_CAPTURES_DIR, MAX_CHAT_HISTORY_TURNS, GROQ_API_KEYS
+from config import CHATS_DATA_DIR, CAMERA_CAPTURES_DIR, MAX_CHAT_HISTORY_TURNS, GROQ_API_KEYS, CLASSROOM_MODE
 from app.models import ChatMessage
+from app.services.teacher_persona import build_teacher_prompt, format_division_context
 from app.services.groq_service import GroqService
 from app.services.realtime_service import RealtimeGroqService
 from app.services.brain_service import BrainService
@@ -62,6 +63,83 @@ _LANG_DIRECTIVES = {
           "Reply ONLY in Marathi (मराठी, Devanagari script) — never Hindi — "
           "no matter what language the user writes in.",
 }
+
+
+# Localized lines for the AI-Teacher "start / next class" flow (spoken to the class
+# in its own language). {ch} = localized chapter label, {title} = lecture title,
+# {cls} = class label.
+_CH_LABEL = {"en": "Chapter {n}", "hi": "अध्याय {n}", "mr": "धडा {n}"}
+_START_CLASS_FRIENDLY = {
+    "en": "Alright students, let's begin {ch}: {title}! Watch the lecture carefully, and come back when you're done — we'll discuss it together.",
+    "hi": "ठीक है बच्चों, चलिए {ch}: {title} शुरू करते हैं! ध्यान से लेक्चर देखिए और देखने के बाद वापस आइए — हम मिलकर इस पर चर्चा करेंगे।",
+    "mr": "चला विद्यार्थ्यांनो, आपण {ch}: {title} सुरू करूया! लेक्चर लक्षपूर्वक पाहा आणि झाल्यावर परत या — आपण त्यावर एकत्र चर्चा करूया.",
+}
+_START_NO_LECTURES = {
+    "en": "Students, no AI lectures have been uploaded for {cls} yet. Please ask your teacher to add them from the Lectures panel.",
+    "hi": "बच्चों, {cls} के लिए अभी तक कोई AI लेक्चर अपलोड नहीं हुआ है। कृपया अपने शिक्षक से Lectures पैनल से जोड़ने को कहें।",
+    "mr": "विद्यार्थ्यांनो, {cls} साठी अजून कोणतेही AI लेक्चर अपलोड केलेले नाही. कृपया तुमच्या शिक्षकांना Lectures पॅनलमधून जोडण्यास सांगा.",
+}
+_START_ALL_DONE = {
+    "en": "Wonderful work, students — we've completed all the AI lectures uploaded for {cls}! 🎉 We can revise any chapter you'd like.",
+    "hi": "शाबाश बच्चों — हमने {cls} के सभी AI लेक्चर पूरे कर लिए हैं! 🎉 आप जो भी अध्याय चाहें, हम दोहरा सकते हैं।",
+    "mr": "शाब्बास विद्यार्थ्यांनो — आपण {cls} चे सर्व AI लेक्चर पूर्ण केले आहेत! 🎉 तुम्हाला हवा असलेला कोणताही धडा आपण उजळणी करू शकतो.",
+}
+_VIDEO_WAIT = {
+    "en": "One moment, students — I'm still preparing the lesson material. Please try again in a few seconds.",
+    "hi": "एक मिनट बच्चों — मैं अभी पाठ की सामग्री तैयार कर रहा हूँ। कृपया कुछ सेकंड बाद फिर कोशिश कीजिए।",
+    "mr": "एक मिनिट विद्यार्थ्यांनो — मी अजून धड्याची सामग्री तयार करत आहे. कृपया काही सेकंदांनी पुन्हा प्रयत्न करा.",
+}
+_VIDEO_READY = {
+    "en": "Well done, students! Now, what would you like to do next?",
+    "hi": "शाबाश बच्चों! अब आप आगे क्या करना चाहेंगे?",
+    "mr": "शाब्बास विद्यार्थ्यांनो! आता तुम्हाला पुढे काय करायचे आहे?",
+}
+_REVISE_FRIENDLY = {
+    "en": "Of course, students — let's revise {ch}: {title}. Watch it once more and tell me if anything is still unclear.",
+    "hi": "बिलकुल बच्चों — चलिए {ch}: {title} दोहराते हैं। एक बार फिर देखिए और बताइए अगर कुछ समझ न आया हो।",
+    "mr": "नक्कीच विद्यार्थ्यांनो — आपण {ch}: {title} ची उजळणी करूया. पुन्हा एकदा पाहा आणि काही अडचण असल्यास सांगा.",
+}
+_REVISE_NOTHING = {
+    "en": "We haven't completed any AI lesson yet, students — let's start our first one instead. Just say 'start the class'.",
+    "hi": "बच्चों, हमने अभी तक कोई AI पाठ पूरा नहीं किया है — चलिए पहला पाठ शुरू करते हैं। कहिए 'क्लास शुरू करो'।",
+    "mr": "विद्यार्थ्यांनो, आपण अजून कोणताही AI धडा पूर्ण केलेला नाही — चला पहिला धडा सुरू करूया. फक्त म्हणा 'क्लास सुरू कर'.",
+}
+_REVISE_NOT_FOUND = {
+    "en": "I don't have Chapter {n} saved for {cls}, students. Please ask your teacher to add it from the Lectures panel.",
+    "hi": "बच्चों, {cls} के लिए अध्याय {n} सेव नहीं है। कृपया अपने शिक्षक से Lectures पैनल से जोड़ने को कहें।",
+    "mr": "विद्यार्थ्यांनो, {cls} साठी धडा {n} सेव्ह केलेला नाही. कृपया तुमच्या शिक्षकांना Lectures पॅनलमधून जोडण्यास सांगा.",
+}
+_START_NEEDS_DIVISION = {
+    "en": "Before we begin, please select your School, Class and Division using the classroom button at the top — then say 'start the class'.",
+    "hi": "शुरू करने से पहले, कृपया ऊपर दिए classroom बटन से अपना स्कूल, कक्षा और डिवीज़न चुनें — फिर कहिए 'क्लास शुरू करो'।",
+    "mr": "सुरू करण्यापूर्वी, कृपया वरील classroom बटणाने तुमची शाळा, वर्ग आणि तुकडी निवडा — मग म्हणा 'क्लास सुरू कर'.",
+}
+
+
+# One-shot LLM directives for assessment / doubts (Phase 3). These are meta-instructions
+# to the teacher LLM (kept in English); the persona + language directive already force
+# the reply into the division's language, so the produced content is in-character and in
+# the right language. {topic} = current chapter title. {doubt} = the student's question.
+_ASSESS_DIRECTIVE = {
+    "quiz": "The class has asked for a QUICK QUIZ on the current AI lesson \"{topic}\". As their teacher, "
+            "ask 5 age-appropriate multiple-choice questions (options a–d) about THIS AI lesson only, then "
+            "give the correct answers at the end and encourage the class.",
+    "worksheet": "The class has asked for a WORKSHEET on the current AI lesson \"{topic}\". As their teacher, "
+                 "give 6–8 short numbered practice questions (mix of fill-in-the-blank, true/false and one-line "
+                 "answers) about THIS AI lesson only. Do not include the answers unless asked.",
+    "homework": "The class has asked for HOMEWORK on the current AI lesson \"{topic}\". As their teacher, assign "
+                "2–3 short at-home tasks or questions about THIS AI lesson only, and say you'll review it next class.",
+    "important": "The class has asked for the IMPORTANT QUESTIONS from the current AI lesson \"{topic}\". As their "
+                 "teacher, list the 5 most important exam-style questions about THIS AI lesson only, each with a "
+                 "short model answer.",
+    "summary": "The class has asked for a SUMMARY of the current AI lesson \"{topic}\". As their teacher, give a "
+               "clear, short recap of THIS AI lesson only (4–6 key points), then ask if there are any doubts.",
+}
+_DOUBT_DIRECTIVE = (
+    "A student has raised this doubt during the AI lesson: \"{doubt}\". As their caring teacher, acknowledge it "
+    "warmly, answer it clearly and simply (strictly about Artificial Intelligence), then check whether it is now "
+    "clear. If the doubt is unrelated to AI, gently steer back to AI."
+)
 
 
 def match_language_command(text: str) -> Optional[str]:
@@ -433,16 +511,110 @@ class ChatService:
             self.save_chat_session(session_id)
 
 
+    def _apply_active_division(self, session_id: str, division_id: str) -> None:
+        """Bind a classroom (School->Class->Division) to this session.
+
+        Runs only when the division actually changes (so a manual mid-class
+        language switch isn't reset on every message). On change it stores the
+        division context (for the Phase-2 teacher loop) and sets the session's
+        conversation language from the division's preferred_language — that single
+        line is what makes the Phase-0 persona greet/teach in the class's own
+        language with no manual switch.
+        """
+        if not division_id:
+            return
+        if self.get_session_metadata(session_id, "active_division_id") == division_id:
+            return
+        try:
+            from app.services import school_service
+            info = school_service.get_division(division_id)
+        except Exception as e:
+            logger.warning("[JARVIS-STREAM] Division lookup failed for %s: %s", division_id, e)
+            return
+        if not info:
+            return
+        self.set_session_metadata(session_id, "active_division_id", division_id)
+        self.set_session_metadata(session_id, "division_context", info)
+        lang = (info.get("preferred_language") or "en").lower()
+        if lang in _LANG_DIRECTIVES or lang == "en":
+            self.set_session_metadata(session_id, "conversation_lang", lang)
+        logger.info("[JARVIS-STREAM] Session %s → division %s (%s / %s, lang=%s)",
+                    session_id[:12], division_id, info.get("school_name", ""),
+                    info.get("grade_label", ""), lang)
+
+    def _teacher_lang(self, session_id: str) -> str:
+        """Active classroom language ('en'|'hi'|'mr') for canned teacher lines."""
+        lang = self.get_session_metadata(session_id, "conversation_lang") or "en"
+        return lang if lang in ("en", "hi", "mr") else "en"
+
+    def _current_topic(self, division_id: str, div_ctx: dict):
+        """Best-guess (title, chapter_number) the class is working on right now.
+
+        Prefers the chapter in progress, then the most recently completed, then the
+        next uncompleted. Used to focus assessment/doubt content on the right lesson.
+        """
+        try:
+            from app.services import lecture_service as _ls2
+            from app.services import progress_service as _prog
+            chapters = _ls2.list_lectures_for_class(div_ctx.get("class_name", ""))
+            if not chapters:
+                return "", None
+            prog = _prog.get_progress(division_id)
+            cur = prog.get("current_chapter")
+            if isinstance(cur, int):
+                for c in chapters:
+                    if c["chapter"] == cur:
+                        return c.get("title", ""), cur
+            done = prog.get("completed", [])
+            if done:
+                last = done[-1]
+                return last.get("title", ""), last.get("chapter")
+            nxt = _prog.next_uncompleted(division_id, chapters)
+            if nxt:
+                return nxt.get("title", ""), nxt.get("chapter")
+        except Exception as e:
+            logger.warning("[AI-TEACHER] current-topic lookup failed: %s", e)
+        return "", None
+
+    def _mark_watched_chapter_complete(self, session_id: str, video_id: Optional[str]) -> None:
+        """Credit a just-watched lecture to the active division's progress.
+
+        Only credits when the video belongs to THIS division's class, so a stray
+        YouTube link the class watched can't mark a chapter done.
+        """
+        if not video_id:
+            return
+        div_id = self.get_session_metadata(session_id, "active_division_id")
+        div_ctx = self.get_session_metadata(session_id, "division_context") or {}
+        if not div_id or not div_ctx.get("class_name"):
+            return
+        try:
+            from app.services import lecture_service as _ls2
+            from app.services import progress_service as _prog
+            slot = _ls2.find_lecture_by_video_id(video_id)
+            if not slot or slot["class_name"] != div_ctx["class_name"]:
+                return
+            _prog.mark_complete(div_id, slot["chapter"], slot.get("title", ""))
+        except Exception as e:
+            logger.warning("[AI-TEACHER] mark-complete failed for %s: %s", video_id, e)
+
     def process_jarvis_message_stream(
-        self, session_id: str, user_message: str, imgbase64: Optional[str] = None
+        self, session_id: str, user_message: str, imgbase64: Optional[str] = None,
+        division_id: Optional[str] = None,
     ) -> Iterator[Union[str, Dict[str, Any]]]:
 
         t0_jarvis = time.perf_counter()
-        logger.info("[JARVIS-STREAM] Session: %s | User: %.200s | img: %s",
-                    session_id[:12], user_message[:80], "yes" if imgbase64 else "no")
+        logger.info("[JARVIS-STREAM] Session: %s | User: %.200s | img: %s | div: %s",
+                    session_id[:12], user_message[:80], "yes" if imgbase64 else "no",
+                    division_id or "-")
         self.add_message(session_id, "user", user_message)
         self.add_message(session_id, "assistant", "")
         chat_history = self.format_history_for_llm(session_id, exclude_last=True)
+
+        # Bind the active classroom (sets conversation_lang from the division's
+        # language) BEFORE any language matching, so an explicit "speak in X" in
+        # this same message still wins.
+        self._apply_active_division(session_id, division_id)
 
         yield {"_activity": {"event": "query_detected", "message": user_message}}
 
@@ -504,6 +676,53 @@ class ChatService:
             self.save_chat_session(session_id)
             return
 
+        # --- Revision command (pre-brain shortcut, AI Teacher Phase 2) ---
+        # Runs BEFORE the lecture command so "revise class 5 chapter 1" re-opens the
+        # chapter as revision (counted) rather than as a fresh lecture. Falls through
+        # untouched when no classroom is selected, so nothing regresses outside teacher mode.
+        if CLASSROOM_MODE:
+            _rev_cmd = _ls.match_revision_command(user_message)
+            _rev_div = self.get_session_metadata(session_id, "active_division_id")
+            _rev_ctx = self.get_session_metadata(session_id, "division_context") or {}
+            if _rev_cmd and _rev_div and _rev_ctx.get("class_name"):
+                from app.services import progress_service as _prog
+                _lang = self.get_session_metadata(session_id, "conversation_lang") or "en"
+                _lang = _lang if _lang in ("en", "hi", "mr") else "en"
+                _cls_label = _rev_ctx.get("grade_label") or _rev_ctx["class_name"]
+                _chapters = _ls.list_lectures_for_class(_rev_ctx["class_name"])
+                _want = _rev_cmd.get("chapter")
+                if _want is None:
+                    # No chapter named — revise the most recently completed one.
+                    _done = _prog.get_progress(_rev_div)["completed"]
+                    _want = _done[-1].get("chapter") if _done else None
+                _target = next((c for c in _chapters if c["chapter"] == _want), None) if _want else None
+
+                if _want is None:
+                    _resp = _REVISE_NOTHING[_lang]
+                elif _target is None:
+                    _resp = _REVISE_NOT_FOUND[_lang].format(n=_want, cls=_cls_label)
+                else:
+                    _resp = None
+
+                if _resp is not None:
+                    self.sessions[session_id][-1].content = _resp
+                    yield _resp
+                    self.save_chat_session(session_id)
+                    return
+
+                _prog.record_revision(_rev_div, _target["chapter"])
+                _prog.record_opened(_rev_div, _target["chapter"], _target.get("title", ""))
+                _friendly = _REVISE_FRIENDLY[_lang].format(
+                    ch=_CH_LABEL[_lang].format(n=_target["chapter"]), title=_target.get("title", ""),
+                )
+                logger.info("[AI-TEACHER] Revision → %s ch %d for div %s",
+                            _rev_ctx["class_name"], _target["chapter"], _rev_div)
+                yield from self._handle_youtube_video(
+                    session_id, _target["video_id"], _target["youtube_url"],
+                    friendly_text=_friendly, lecture_title=_target.get("title", ""),
+                )
+                return
+
         # --- Lecture catalog command (pre-brain shortcut, Feature 8) ---
         _lec = _ls.match_lecture_command(user_message)
         if _lec:
@@ -547,6 +766,59 @@ class ChatService:
             )
             return
 
+        # --- Start / continue the AI class (pre-brain shortcut, AI Teacher) ---
+        # "start the class" / "open the lecture" / "next chapter" / "क्लास सुरू कर"
+        # opens the right lecture for the SELECTED division's class automatically,
+        # walking the chapter sequence. (Full progress intelligence — mark-complete,
+        # revision, day-2 continuity — arrives in Phase 2.)
+        if CLASSROOM_MODE:
+            _start_cmd = _ls.match_start_class_command(user_message)
+            if _start_cmd:
+                _lang = self.get_session_metadata(session_id, "conversation_lang") or "en"
+                _lang = _lang if _lang in ("en", "hi", "mr") else "en"
+                _active_div = self.get_session_metadata(session_id, "active_division_id")
+                _div_ctx = self.get_session_metadata(session_id, "division_context") or {}
+                if not _active_div or not _div_ctx.get("class_name"):
+                    _resp = _START_NEEDS_DIVISION[_lang]
+                    self.sessions[session_id][-1].content = _resp
+                    yield _resp
+                    self.save_chat_session(session_id)
+                    return
+
+                _cls_label = _div_ctx.get("grade_label") or _div_ctx["class_name"]
+                _chapters = _ls.list_lectures_for_class(_div_ctx["class_name"])
+                if not _chapters:
+                    _resp = _START_NO_LECTURES[_lang].format(cls=_cls_label)
+                    self.sessions[session_id][-1].content = _resp
+                    yield _resp
+                    self.save_chat_session(session_id)
+                    return
+
+                from app.services import progress_service as _prog
+                # "start" resumes the lesson in progress; "next" advances to the first
+                # chapter the class hasn't completed yet.
+                _target = _prog.resolve_target(_active_div, _chapters, _start_cmd["action"])
+
+                if _target is None:
+                    _resp = _START_ALL_DONE[_lang].format(cls=_cls_label)
+                    self.sessions[session_id][-1].content = _resp
+                    yield _resp
+                    self.save_chat_session(session_id)
+                    return
+
+                _prog.record_opened(_active_div, _target["chapter"], _target.get("title", ""))
+                _ch_label = _CH_LABEL[_lang].format(n=_target["chapter"])
+                _friendly = _START_CLASS_FRIENDLY[_lang].format(
+                    ch=_ch_label, title=_target.get("title", "")
+                )
+                logger.info("[AI-TEACHER] Start-class (%s) → %s ch %d for div %s",
+                            _start_cmd["action"], _div_ctx["class_name"], _target["chapter"], _active_div)
+                yield from self._handle_youtube_video(
+                    session_id, _target["video_id"], _target["youtube_url"],
+                    friendly_text=_friendly, lecture_title=_target.get("title", ""),
+                )
+                return
+
         # --- YouTube URL detection (pre-brain shortcut) ---
         _video_id = _qs.extract_video_id(user_message)
         if _video_id:
@@ -557,11 +829,17 @@ class ChatService:
         # --- User returning after watching a video ---
         _pending_yt = self.get_session_metadata(session_id, "pending_youtube")
         if _pending_yt and _qs.is_return_signal(user_message):
+            # AI Teacher (Phase 2): the class has watched this lecture — credit it to the
+            # division now, BEFORE the transcript branches, so progress advances even if
+            # the transcript fetch failed.
+            if CLASSROOM_MODE:
+                self._mark_watched_chapter_complete(session_id, _pending_yt.get("video_id"))
             _status = _pending_yt.get("status", "ready")
 
             if _status == "fetching":
                 # Still downloading/transcribing — user came back very quickly
-                _wait_resp = "Sir, I'm still processing the video in the background. Give me a moment and try again."
+                _wait_resp = (_VIDEO_WAIT[self._teacher_lang(session_id)] if CLASSROOM_MODE
+                              else "Sir, I'm still processing the video in the background. Give me a moment and try again.")
                 self.sessions[session_id][-1].content = _wait_resp
                 yield _wait_resp
                 self.save_chat_session(session_id)
@@ -591,11 +869,52 @@ class ChatService:
             _pending_yt["status"] = "acknowledged"
             self.set_session_metadata(session_id, "pending_youtube", _pending_yt)
             yield {"_interactive_choice": {"type": "youtube_analysis", "video_id": _pending_yt["video_id"]}}
-            _choice_resp = "Sir, I've analysed the video. What would you like?"
+            _choice_resp = (_VIDEO_READY[self._teacher_lang(session_id)] if CLASSROOM_MODE
+                            else "Sir, I've analysed the video. What would you like?")
             self.sessions[session_id][-1].content = _choice_resp
             yield _choice_resp
             self.save_chat_session(session_id)
             return
+
+        # --- Assessment & doubt (pre-brain shortcut, AI Teacher Phase 3) ---
+        # Sets a ONE-SHOT teacher directive so the LLM produces a quiz/worksheet/homework/
+        # important-questions/summary — or answers a logged doubt — in character and in the
+        # division's language, then falls through to the normal teacher LLM stream below.
+        # (No early return: the directive is consumed where _extra_parts is assembled.)
+        # `force_general` pins it to the teacher LLM route so the brain can't misfile a
+        # "quiz"/"worksheet" as a TASK (image/content) intent.
+        force_general = False
+        if CLASSROOM_MODE:
+            _a_div = self.get_session_metadata(session_id, "active_division_id")
+            _a_ctx = self.get_session_metadata(session_id, "division_context") or {}
+            if _a_div and _a_ctx.get("class_name"):
+                _doubt_text = _ls.match_doubt_command(user_message)
+                _assess = None if _doubt_text else _ls.match_assessment_command(user_message)
+                if _doubt_text:
+                    try:
+                        from app.services import doubts_service as _ds
+                        _, _dchap = self._current_topic(_a_div, _a_ctx)
+                        _ds.record_doubt(_a_div, _dchap, _doubt_text)
+                    except Exception as _de:
+                        logger.warning("[AI-TEACHER] doubt log failed: %s", _de)
+                    self.set_session_metadata(
+                        session_id, "teacher_directive",
+                        _DOUBT_DIRECTIVE.format(doubt=_doubt_text[:400]),
+                    )
+                    force_general = True
+                elif _assess:
+                    _topic, _achap = self._current_topic(_a_div, _a_ctx)
+                    self.set_session_metadata(
+                        session_id, "teacher_directive",
+                        _ASSESS_DIRECTIVE[_assess["kind"]].format(topic=_topic or "the current AI topic"),
+                    )
+                    force_general = True
+                    if _achap is not None:
+                        try:
+                            from app.services import progress_service as _prog
+                            _prog.record_assessment(_a_div, _achap, _assess["kind"])
+                        except Exception as _ae:
+                            logger.warning("[AI-TEACHER] assessment log failed: %s", _ae)
 
         # --- Practical command detection (pre-brain shortcut, Feature 9) ---
         # Runs BEFORE the practice-PDF block because it's more specific (needs class + chapter).
@@ -659,6 +978,11 @@ class ChatService:
         from app.services.practice_service import extract_class_from_message, list_pdfs_for_class
         _awaiting_class = self.get_session_metadata(session_id, "_practice_awaiting_class")
         _is_practice_msg = bool(_re.search(r'\b(practice|worksheet|exercises|study material|study sheet)\b', user_message or "", _re.IGNORECASE))
+        # If the AI-Teacher assessment handler already claimed this message (e.g. "give us a
+        # worksheet on this chapter"), don't also dump the class-wide practice PDFs.
+        if self.get_session_metadata(session_id, "teacher_directive"):
+            _is_practice_msg = False
+            _awaiting_class = False
         if _is_practice_msg or _awaiting_class:
             _cls = extract_class_from_message(user_message)
             if _cls is None:
@@ -713,7 +1037,10 @@ class ChatService:
         # Upload messages already have extracted content in the text — skip camera routing entirely
         is_upload_message = (user_message or "").lstrip().startswith("[Uploaded:")
 
-        if not is_upload_message and self.brain_service:
+        if force_general:
+            # Assessment / doubt directive is pending — keep it on the teacher LLM route.
+            category, primary_method = CATEGORY_GENERAL, "teacher"
+        elif not is_upload_message and self.brain_service:
             category, primary_method, primary_elapsed_ms = self.brain_service.classify_primary(
                 user_message, chat_history, key_index=brain_idx if brain_idx is not None else 0
             )
@@ -736,7 +1063,45 @@ class ChatService:
         # extra system parts so the general/realtime/mixed LLM routes always reply
         # in the selected language. Stays None when no language has been chosen.
         _conv_lang = self.get_session_metadata(session_id, "conversation_lang")
-        _extra_parts = list(_video_ctx_parts) if _video_ctx_parts else []
+        _extra_parts = []
+        # Teacher persona FIRST so it dominates the base "AI assistant" prompt (it is
+        # appended after the base, and explicitly overrides it). The selected division's
+        # facts (School/Class/Division/Language) are injected so the teacher answers
+        # "which class am I in?" correctly instead of hallucinating.
+        if CLASSROOM_MODE:
+            _div_info = self.get_session_metadata(session_id, "division_context")
+            _div_ctx_str = format_division_context(_div_info) if _div_info else ""
+            # Phase 2 — append where this class actually is in the curriculum, so the
+            # teacher can recap the last lesson and name the next one instead of guessing.
+            if _div_info and _div_info.get("class_name"):
+                try:
+                    from app.services import progress_service as _prog2
+                    _prog_lines = _prog2.build_context_lines(
+                        self.get_session_metadata(session_id, "active_division_id"),
+                        _ls.list_lectures_for_class(_div_info["class_name"]),
+                    )
+                    if _prog_lines:
+                        _div_ctx_str = f"{_div_ctx_str}\n{_prog_lines}" if _div_ctx_str else _prog_lines
+                    # Phase 3 — surface unresolved doubts so the recap can address them.
+                    from app.services import doubts_service as _ds2
+                    _doubt_lines = _ds2.recap_lines(
+                        self.get_session_metadata(session_id, "active_division_id")
+                    )
+                    if _doubt_lines:
+                        _div_ctx_str = f"{_div_ctx_str}\n{_doubt_lines}" if _div_ctx_str else _doubt_lines
+                except Exception as _pe:
+                    logger.warning("[AI-TEACHER] progress context unavailable: %s", _pe)
+            _extra_parts.append(build_teacher_prompt(
+                language=_conv_lang or "en", division_context=_div_ctx_str
+            ))
+            # Phase 3 — one-shot assessment/doubt directive (consumed then cleared),
+            # appended AFTER the persona so it shapes just this reply.
+            _directive = self.get_session_metadata(session_id, "teacher_directive")
+            if _directive:
+                _extra_parts.append(_directive)
+                self.clear_session_metadata(session_id, "teacher_directive")
+        if _video_ctx_parts:
+            _extra_parts.extend(_video_ctx_parts)
         if _conv_lang in _LANG_DIRECTIVES:
             _extra_parts.append(_LANG_DIRECTIVES[_conv_lang])
         _extra_parts = _extra_parts or None

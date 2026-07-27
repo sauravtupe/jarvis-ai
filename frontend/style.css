@@ -2690,6 +2690,86 @@ body.hide-chat .message:not(.rich-output):not(:has(
     flex-shrink: 0;
 }
 
+/* ── AI Teacher — Classroom (School/Class/Division) selection ─────────────── */
+#division-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9998;
+    background: rgba(5, 5, 16, 0.92);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+}
+.dz-label {
+    display: block;
+    text-align: left;
+    margin: 14px 0 0;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+.dz-label select {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(124, 106, 239, 0.25);
+    color: var(--text-primary, #e8e8f8);
+    font-size: 0.92rem;
+    font-family: 'Outfit', sans-serif;
+    cursor: pointer;
+}
+.dz-label select:disabled { opacity: 0.5; cursor: not-allowed; }
+.dz-label select option { background: #12122a; color: #e8e8f8; }
+.dz-empty {
+    margin: 18px 0 4px;
+    padding: 16px;
+    border-radius: 12px;
+    background: rgba(124, 106, 239, 0.08);
+    border: 1px dashed rgba(124, 106, 239, 0.35);
+    color: var(--text-secondary, #a0a0c0);
+    font-size: 0.85rem;
+    line-height: 1.5;
+    text-align: left;
+}
+.google-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+/* Classroom pill in header */
+.division-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    background: rgba(124, 106, 239, 0.12);
+    border: 1px solid rgba(124, 106, 239, 0.25);
+    border-radius: 20px;
+    color: var(--text-secondary, #c8c8e0);
+    font-size: 0.72rem;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    max-width: 210px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: 'Outfit', sans-serif;
+}
+.division-pill:hover { background: rgba(124, 106, 239, 0.22); }
+.dz-count {
+    margin-left: 2px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: rgba(124, 106, 239, 0.25);
+    font-size: 0.66rem;
+    font-weight: 700;
+}
+@media (max-width: 480px) {
+    .division-pill { max-width: 130px; font-size: 0.66rem; padding: 4px 9px; }
+}
+
 @media (max-width: 480px) { #avatar-container { display: none; } }
 
 /* ── Mobile-specific header fixes ───────────────────────────────────────── */
@@ -2734,6 +2814,95 @@ body.hide-chat .message:not(.rich-output):not(:has(
 .practicals-panel {
     z-index: 26;  /* above lectures-panel which is 25 */
 }
+
+/* ── Classrooms admin drawer (AI Teacher Phase 1) ─────────────────────────── */
+.classrooms-panel { z-index: 26; }   /* above lectures-panel */
+.cr-add-school {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.cr-add-school input {
+    flex: 1 1 100%;
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--text-primary, #e8e8f8);
+    font-size: 0.88rem;
+    font-family: 'Outfit', sans-serif;
+}
+.cr-add-school .btn-primary { flex: 1 1 100%; }
+.cr-tree { display: flex; flex-direction: column; gap: 12px; }
+.cr-school {
+    border: 1px solid rgba(124, 106, 239, 0.22);
+    border-radius: 12px;
+    padding: 12px;
+    background: rgba(124, 106, 239, 0.05);
+}
+.cr-school-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.cr-school-name { font-weight: 600; font-size: 0.95rem; color: var(--text-primary, #e8e8f8); }
+.cr-school-name small { font-weight: 400; color: var(--text-muted); font-size: 0.72rem; }
+.cr-classes { display: flex; flex-direction: column; gap: 8px; }
+.cr-class {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9px;
+    padding: 9px 10px;
+    background: rgba(255, 255, 255, 0.02);
+}
+.cr-class-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 0.85rem;
+}
+.cr-divisions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.cr-div {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 14px;
+    background: rgba(124, 106, 239, 0.14);
+    border: 1px solid rgba(124, 106, 239, 0.25);
+    font-size: 0.75rem;
+}
+.cr-div em { color: var(--text-muted); font-style: normal; font-size: 0.7rem; }
+.cr-hint { color: var(--text-muted); font-size: 0.74rem; margin: 0 0 6px; }
+.cr-add-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.cr-add-row select,
+.cr-add-row input {
+    padding: 7px 9px;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--text-primary, #e8e8f8);
+    font-size: 0.8rem;
+    font-family: 'Outfit', sans-serif;
+}
+.cr-add-row select option { background: #12122a; color: #e8e8f8; }
+.cr-add-div .cr-div-name { flex: 1 1 90px; min-width: 0; }
+.cr-mini { padding: 6px 12px !important; font-size: 0.78rem !important; }
+.cr-del {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.78rem;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 5px;
+    flex-shrink: 0;
+}
+.cr-del:hover { color: #ff6b6b; background: rgba(255, 107, 107, 0.12); }
 .practicals-context {
     font-size: .85rem;
     color: var(--text-dim);

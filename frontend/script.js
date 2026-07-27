@@ -284,6 +284,7 @@ function init() {
     initUpload();
     setMode(currentMode);
     autoResizeInput();
+    if (typeof _initSchoolUI === 'function') _initSchoolUI();  // bind classroom picker before auth may open it
     _initAuthUI();
     _initAuth();
     _maybeStartWakeWord();
@@ -686,6 +687,7 @@ async function sendMessageWithImage(text, imgBase64) {
                 session_id: sessionId,
                 tts: _ttsFlag2,
                 imgbase64: imgBase64,
+                division_id: (typeof getActiveDivisionId === 'function' ? getActiveDivisionId() : null),
             }),
             signal: controller.signal,
         });
@@ -1403,7 +1405,8 @@ async function sendMessage(textOverride) {
                 message: messageToSend,
                 session_id: sessionId,
                 tts: _ttsFlag,
-                imgbase64: imgBase64 || null
+                imgbase64: imgBase64 || null,
+                division_id: (typeof getActiveDivisionId === 'function' ? getActiveDivisionId() : null),
             }),
             signal: controller.signal,
         });

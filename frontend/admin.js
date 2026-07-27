@@ -706,3 +706,175 @@ async function _clearSavedPractice() {
         bindWhenReady();
     }
 })();
+
+
+// ─── AI Teacher Phase 1: Classrooms admin (School -> Class -> Division) ───────
+// A self-contained drawer (above the lectures drawer) for building the classroom
+// identity tree. Each division's preferred language flows into the teacher persona
+// at chat time, so a Marathi division is greeted/taught in Marathi automatically.
+
+const _CR_GRADES = ['UKG'].concat(Array.from({ length: 12 }, (_, i) => String(i + 1)));
+const _CR_LANGS = [['en', 'English'], ['hi', 'Hindi'], ['mr', 'Marathi']];
+function _crGradeLabel(g) { return g === 'UKG' ? 'UKG' : 'Class ' + g; }
+function _crLangLabel(l) { return ({ en: 'English', hi: 'Hindi', mr: 'Marathi' })[l] || 'English'; }
+function _crGradeOptions() { return _CR_GRADES.map(g => `<option value="${g}">${_crGradeLabel(g)}</option>`).join(''); }
+function _crLangOptions() { return _CR_LANGS.map(([v, l]) => `<option value="${v}">${l}</option>`).join(''); }
+
+function _crShowError(msg) {
+    const el = $('cr-error');
+    if (!el) return;
+    if (msg) { el.textContent = msg; el.style.display = 'block'; }
+    else { el.style.display = 'none'; }
+}
+
+function _openClassroomsPanel() {
+    const panel = $('classrooms-panel');
+    if (panel) { panel.classList.add('open'); panel.setAttribute('aria-hidden', 'false'); }
+    if (typeof updatePanelOverlay === 'function') updatePanelOverlay();
+    _crShowError('');
+    _refreshClassrooms();
+}
+function _closeClassroomsPanel() {
+    const panel = $('classrooms-panel');
+    if (panel) { panel.classList.remove('open'); panel.setAttribute('aria-hidden', 'true'); }
+    if (typeof updatePanelOverlay === 'function') updatePanelOverlay();
+}
+
+async function _refreshClassrooms() {
+    const tree = $('classrooms-tree');
+    if (!tree) return;
+    tree.innerHTML = '<p class="lectures-loading">Loading…</p>';
+    try {
+        const res = await _adminFetch('/schools');
+        if (!res.ok) { tree.innerHTML = `<p class="lectures-error">Failed to load (HTTP ${res.status}).</p>`; return; }
+        const data = await res.json();
+        const schools = Array.isArray(data.schools) ? data.schools : [];
+        tree.innerHTML = schools.length
+            ? schools.map(_crRenderSchool).join('')
+            : '<p class="lectures-empty">No schools yet. Add one above to get started.</p>';
+    } catch (e) {
+        tree.innerHTML = `<p class="lectures-error">Network error: ${_esc(e.message)}</p>`;
+    }
+}
+
+function _crRenderSchool(s) {
+    const meta = [s.board, s.city].filter(Boolean).map(_esc).join(' · ');
+    const classes = (s.classes || []).map(c => _crRenderClass(s.id, c)).join('');
+    return `
+      <div class="cr-school">
+        <div class="cr-school-head">
+          <span class="cr-school-name">${_esc(s.name)}${meta ? ` <small>${meta}</small>` : ''}</span>
+          <button class="cr-del" data-cr="del-school" data-school="${s.id}" title="Delete school">✕</button>
+        </div>
+        <div class="cr-classes">${classes || '<p class="cr-hint">No classes yet.</p>'}</div>
+        <div class="cr-add-row cr-add-class">
+          <select class="cr-class-grade">${_crGradeOptions()}</select>
+          <button class="btn-secondary cr-mini" data-cr="add-class" data-school="${s.id}">+ Add Class</button>
+        </div>
+      </div>`;
+}
+
+function _crRenderClass(schoolId, c) {
+    const divs = (c.divisions || []).map(d => `
+        <span class="cr-div">${_esc(d.name)} <em>(${_crLangLabel(d.preferred_language)})</em>
+          <button class="cr-del" data-cr="del-div" data-school="${schoolId}" data-class="${c.id}" data-div="${d.id}" title="Delete division">✕</button>
+        </span>`).join('');
+    return `
+      <div class="cr-class">
+        <div class="cr-class-head">
+          <strong>${_crGradeLabel(c.grade)}</strong>
+          <button class="cr-del" data-cr="del-class" data-school="${schoolId}" data-class="${c.id}" title="Delete class">✕</button>
+        </div>
+        <div class="cr-divisions">${divs || '<span class="cr-hint">No divisions yet.</span>'}</div>
+        <div class="cr-add-row cr-add-div">
+          <input type="text" class="cr-div-name" maxlength="20" placeholder="Division (e.g. A)">
+          <select class="cr-div-lang">${_crLangOptions()}</select>
+          <button class="btn-secondary cr-mini" data-cr="add-div" data-school="${schoolId}" data-class="${c.id}">+ Add</button>
+        </div>
+      </div>`;
+}
+
+async function _crHandle(res, okMsg) {
+    if (res.ok || res.status === 204) { if (okMsg && typeof showToast === 'function') showToast(okMsg); return true; }
+    let detail = `HTTP ${res.status}`;
+    try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch (_) {}
+    _crShowError(typeof detail === 'string' ? detail : 'Request failed.');
+    return false;
+}
+
+async function _crAddSchool() {
+    const nameEl = $('cr-school-name'), boardEl = $('cr-school-board'), cityEl = $('cr-school-city');
+    const name = (nameEl && nameEl.value || '').trim();
+    if (!name) { _crShowError('School name is required.'); return; }
+    _crShowError('');
+    const res = await _adminFetch('/schools', {
+        method: 'POST',
+        body: JSON.stringify({ name, board: (boardEl && boardEl.value || '').trim(), city: (cityEl && cityEl.value || '').trim() }),
+    });
+    if (await _crHandle(res, 'School added.')) {
+        if (nameEl) nameEl.value = ''; if (boardEl) boardEl.value = ''; if (cityEl) cityEl.value = '';
+        _refreshClassrooms();
+    }
+}
+
+// One delegated handler for every add/delete button inside the tree.
+async function _crTreeClick(e) {
+    const btn = e.target.closest('[data-cr]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-cr');
+    const sid = btn.getAttribute('data-school');
+    const cid = btn.getAttribute('data-class');
+    const did = btn.getAttribute('data-div');
+    _crShowError('');
+
+    if (action === 'add-class') {
+        const sel = btn.closest('.cr-add-class').querySelector('.cr-class-grade');
+        const res = await _adminFetch(`/schools/${sid}/classes`, {
+            method: 'POST', body: JSON.stringify({ grade: sel ? sel.value : '' }),
+        });
+        if (await _crHandle(res, 'Class added.')) _refreshClassrooms();
+
+    } else if (action === 'add-div') {
+        const row = btn.closest('.cr-add-div');
+        const nameEl = row.querySelector('.cr-div-name');
+        const langEl = row.querySelector('.cr-div-lang');
+        const name = (nameEl && nameEl.value || '').trim();
+        if (!name) { _crShowError('Division name is required.'); return; }
+        const res = await _adminFetch(`/schools/${sid}/classes/${cid}/divisions`, {
+            method: 'POST', body: JSON.stringify({ name, preferred_language: langEl ? langEl.value : 'en' }),
+        });
+        if (await _crHandle(res, 'Division added.')) _refreshClassrooms();
+
+    } else if (action === 'del-school') {
+        if (!confirm('Delete this school and ALL its classes and divisions?')) return;
+        if (await _crHandle(await _adminFetch(`/schools/${sid}`, { method: 'DELETE' }), 'School deleted.')) _refreshClassrooms();
+
+    } else if (action === 'del-class') {
+        if (!confirm('Delete this class and its divisions?')) return;
+        if (await _crHandle(await _adminFetch(`/schools/${sid}/classes/${cid}`, { method: 'DELETE' }), 'Class deleted.')) _refreshClassrooms();
+
+    } else if (action === 'del-div') {
+        if (await _crHandle(await _adminFetch(`/schools/${sid}/classes/${cid}/divisions/${did}`, { method: 'DELETE' }), 'Division deleted.')) _refreshClassrooms();
+    }
+}
+
+(function _initClassroomsUI() {
+    const bind = () => {
+        const openBtn = $('classrooms-btn');
+        const backBtn = $('classrooms-back');
+        const closeBtn = $('classrooms-close');
+        const addSchoolBtn = $('cr-add-school-btn');
+        const tree = $('classrooms-tree');
+        const nameInput = $('cr-school-name');
+        if (openBtn) openBtn.addEventListener('click', _openClassroomsPanel);
+        if (backBtn) backBtn.addEventListener('click', _closeClassroomsPanel);
+        if (closeBtn) closeBtn.addEventListener('click', _closeClassroomsPanel);
+        if (addSchoolBtn) addSchoolBtn.addEventListener('click', _crAddSchool);
+        if (tree) tree.addEventListener('click', _crTreeClick);
+        if (nameInput) nameInput.addEventListener('keydown', ev => {
+            if (ev.key === 'Enter') { ev.preventDefault(); _crAddSchool(); }
+        });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind);
+    else bind();
+})();

@@ -31,6 +31,7 @@ from app.models import (
     AIPracticalRequest, AIPracticalResponse, AIPracticalTask,
     PracticeGenerateResult, PracticeSaveRequest,
     NotesSaveRequest, NotesRecord,
+    SchoolCreate, ClassCreate, DivisionCreate,
 )
 
 RATE_LIMIT_MESSAGE = (
@@ -55,6 +56,9 @@ from app.services.upload_service import UploadService
 from app.services import quiz_service
 from app.services import lecture_service
 from app.services import practical_service
+from app.services import school_service
+from app.services import progress_service
+from app.services import doubts_service
 from app.middleware.auth import get_optional_user
 from app.services.storage_service import (
     upload_bytes_to_s3, startup_restore_from_s3,
@@ -71,7 +75,9 @@ from config import (
     SUPABASE_URL, SUPABASE_ANON_KEY,
     VECTOR_STORE_ENABLED,
     ALLOWED_ORIGINS, RATE_LIMIT_ENABLED, RATE_LIMIT_PER_MINUTE,
+    CLASSROOM_MODE,
 )
+from app.services.teacher_persona import scrub_persona_breaks
 
 
 
@@ -816,6 +822,13 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
         if not text or not text.strip():
             return
 
+        # Classroom voice safety-net: never let the spoken teacher break character on a
+        # rare "as an AI…" slip (the system prompt forbids it; this is the belt).
+        if CLASSROOM_MODE:
+            text = scrub_persona_breaks(text)
+            if not text or not text.strip():
+                return
+
         # Honour the manual conversation language (read fresh each time so a
         # language-switch command's own confirmation is already in the new voice).
         _conv_lang = None
@@ -1110,7 +1123,8 @@ async def chat_jarvis_stream(request: ChatRequest, user_id: str = Depends(get_op
     try:
         session_id = chat_service.get_or_create_session(request.session_id)
         chunk_iter = chat_service.process_jarvis_message_stream(
-            session_id, request.message, imgbase64=request.imgbase64
+            session_id, request.message, imgbase64=request.imgbase64,
+            division_id=request.division_id,
         )
 
         return StreamingResponse(
@@ -1484,6 +1498,122 @@ async def delete_lecture_endpoint(
         return Response(status_code=204)
     except lecture_service.LectureError as e:
         raise _lecture_error_to_http(e)
+
+
+# ─── AI Teacher Phase 1 — School / Class / Division identity ────────────────
+
+
+def _school_error_to_http(exc: school_service.SchoolError) -> HTTPException:
+    return HTTPException(status_code=getattr(exc, "status_code", 400), detail=str(exc))
+
+
+@app.get("/schools")
+async def list_schools_endpoint():
+    """Public — the School->Class->Division tree for the classroom picker."""
+    return {"schools": school_service.list_schools()}
+
+
+@app.post("/schools", status_code=201)
+async def create_school_endpoint(request: SchoolCreate, _: bool = Depends(require_admin)):
+    try:
+        return school_service.add_school(request.name, request.board, request.city)
+    except school_service.SchoolError as e:
+        raise _school_error_to_http(e)
+
+
+@app.delete("/schools/{school_id}", status_code=204)
+async def delete_school_endpoint(school_id: str, _: bool = Depends(require_admin)):
+    try:
+        school_service.delete_school(school_id)
+        return Response(status_code=204)
+    except school_service.SchoolError as e:
+        raise _school_error_to_http(e)
+
+
+@app.post("/schools/{school_id}/classes", status_code=201)
+async def create_class_endpoint(school_id: str, request: ClassCreate, _: bool = Depends(require_admin)):
+    try:
+        return school_service.add_class(school_id, request.grade)
+    except school_service.SchoolError as e:
+        raise _school_error_to_http(e)
+
+
+@app.delete("/schools/{school_id}/classes/{class_id}", status_code=204)
+async def delete_class_endpoint(school_id: str, class_id: str, _: bool = Depends(require_admin)):
+    try:
+        school_service.delete_class(school_id, class_id)
+        return Response(status_code=204)
+    except school_service.SchoolError as e:
+        raise _school_error_to_http(e)
+
+
+@app.post("/schools/{school_id}/classes/{class_id}/divisions", status_code=201)
+async def create_division_endpoint(
+    school_id: str, class_id: str, request: DivisionCreate, _: bool = Depends(require_admin),
+):
+    try:
+        return school_service.add_division(
+            school_id, class_id, request.name, request.preferred_language
+        )
+    except school_service.SchoolError as e:
+        raise _school_error_to_http(e)
+
+
+@app.delete("/schools/{school_id}/classes/{class_id}/divisions/{division_id}", status_code=204)
+async def delete_division_endpoint(
+    school_id: str, class_id: str, division_id: str, _: bool = Depends(require_admin),
+):
+    try:
+        school_service.delete_division(school_id, class_id, division_id)
+        return Response(status_code=204)
+    except school_service.SchoolError as e:
+        raise _school_error_to_http(e)
+
+
+@app.get("/divisions/{division_id}/progress")
+async def get_division_progress_endpoint(division_id: str):
+    """Public — where this classroom has reached in the AI curriculum (Phase 2)."""
+    info = school_service.get_division(division_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Division not found")
+    chapters = lecture_service.list_lectures_for_class(info["class_name"])
+    data = progress_service.summary(division_id, chapters)
+    data.update({
+        "school_name": info["school_name"],
+        "grade_label": info["grade_label"],
+        "division_name": info["division_name"],
+        "preferred_language": info["preferred_language"],
+    })
+    return data
+
+
+@app.delete("/divisions/{division_id}/progress", status_code=204)
+async def reset_division_progress_endpoint(division_id: str, _: bool = Depends(require_admin)):
+    """Admin — wipe a division's progress (restart the syllabus for a new batch)."""
+    progress_service.reset_progress(division_id)
+    return Response(status_code=204)
+
+
+@app.get("/divisions/{division_id}/doubts")
+async def list_division_doubts_endpoint(division_id: str, only_open: bool = False):
+    """Public — the doubts this classroom has raised (Phase 3)."""
+    doubts = doubts_service.list_doubts(division_id, only_open=only_open)
+    return {"division_id": division_id, "doubts": doubts, "open_count": doubts_service.open_count(division_id)}
+
+
+@app.put("/divisions/{division_id}/doubts/{doubt_id}/resolve")
+async def resolve_division_doubt_endpoint(division_id: str, doubt_id: str, _: bool = Depends(require_admin)):
+    """Admin — mark a doubt resolved."""
+    if not doubts_service.resolve_doubt(division_id, doubt_id):
+        raise HTTPException(status_code=404, detail="Doubt not found")
+    return {"ok": True}
+
+
+@app.delete("/divisions/{division_id}/doubts", status_code=204)
+async def clear_division_doubts_endpoint(division_id: str, _: bool = Depends(require_admin)):
+    """Admin — clear all doubts for a division."""
+    doubts_service.clear_doubts(division_id)
+    return Response(status_code=204)
 
 
 # ─── Feature 9 — Practical Exercises ────────────────────────────────────────

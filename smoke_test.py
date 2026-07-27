@@ -73,7 +73,7 @@ def check_python_syntax():
 # then the extracted feature modules, then script.js last (the foundation + init).
 # Keep this list in sync with the <script> tags in frontend/index.html.
 _FRONTEND_JS_LOAD_ORDER = ["orb.js", "core.js", "tts.js", "voice.js", "auth.js",
-                           "learning.js", "admin.js", "media.js", "script.js"]
+                           "school.js", "learning.js", "admin.js", "media.js", "script.js"]
 
 
 @check("JS syntax + cross-file redeclaration")

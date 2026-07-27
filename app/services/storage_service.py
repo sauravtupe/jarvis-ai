@@ -425,6 +425,36 @@ def _startup_restore_from_s3_inner() -> None:
             logger.info("[STORAGE] Restored lectures/lectures.json from S3 (%d bytes)", len(data))
             restored += 1
 
+    # 3c. School identity store (AI Teacher Phase 1)
+    from config import SCHOOLS_JSON_PATH
+    SCHOOLS_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not SCHOOLS_JSON_PATH.exists():
+        data = download_from_s3("schools/schools.json")
+        if data:
+            SCHOOLS_JSON_PATH.write_bytes(data)
+            logger.info("[STORAGE] Restored schools/schools.json from S3 (%d bytes)", len(data))
+            restored += 1
+
+    # 3d. Division progress (AI Teacher Phase 2)
+    from config import PROGRESS_JSON_PATH
+    PROGRESS_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not PROGRESS_JSON_PATH.exists():
+        data = download_from_s3("progress/division_progress.json")
+        if data:
+            PROGRESS_JSON_PATH.write_bytes(data)
+            logger.info("[STORAGE] Restored progress/division_progress.json from S3 (%d bytes)", len(data))
+            restored += 1
+
+    # 3e. Division doubts (AI Teacher Phase 3)
+    from config import DOUBTS_JSON_PATH
+    DOUBTS_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not DOUBTS_JSON_PATH.exists():
+        data = download_from_s3("doubts/division_doubts.json")
+        if data:
+            DOUBTS_JSON_PATH.write_bytes(data)
+            logger.info("[STORAGE] Restored doubts/division_doubts.json from S3 (%d bytes)", len(data))
+            restored += 1
+
     # 4. Chat sessions
     s3_keys = list_s3_prefix("chats/")
     for key in s3_keys:

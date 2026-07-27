@@ -103,6 +103,34 @@ def list_lectures() -> List[Dict]:
     return out
 
 
+def find_lecture_by_video_id(video_id: str) -> Optional[Dict]:
+    """Resolve a video id back to its catalog slot: {class_name, chapter, title}.
+
+    Used by the AI-Teacher progress loop to credit a watched lecture to the right
+    chapter. Returns None when the video isn't in the catalog.
+    """
+    slot = _find_slot_by_video_id(video_id)
+    if not slot:
+        return None
+    class_name, chapter = slot
+    rec = _load_catalog().get(class_name, {}).get(f"chapter_{chapter}")
+    return {
+        "class_name": class_name,
+        "chapter": chapter,
+        "title": rec.get("title", "") if isinstance(rec, dict) else "",
+    }
+
+
+def list_lectures_for_class(class_name: str) -> List[Dict]:
+    """Chapters that have a saved video for one class, sorted ascending by chapter.
+
+    Used by the AI-Teacher "start / next class" flow to walk the lecture sequence.
+    """
+    out = [l for l in list_lectures() if l.get("class_name") == class_name and l.get("video_id")]
+    out.sort(key=lambda r: r["chapter"])
+    return out
+
+
 def _class_sort_key(class_name: str) -> Tuple[int, int]:
     """UKG sorts before class_1; numeric classes sort ascending."""
     if class_name == "UKG":
@@ -399,6 +427,7 @@ _HINDI_KEYWORDS = [
     (r"कक्षा", "class"),
     (r"काक्षा", "class"),
     (r"इयत्ता", "class"),          # Marathi: इयत्ता = standard/class
+    (r"वर्ग", "class"),            # Marathi: वर्ग = class
     (r"\bkakshya\b", "class"),
     (r"\bkaksha\b", "class"),
     (r"\biyatta\b", "class"),
@@ -639,6 +668,147 @@ def match_lecture_command(text: str) -> Optional[Dict]:
         "youtube_url": record.get("youtube_url", ""),
         "video_id": record.get("video_id", ""),
     }
+
+
+# ─── "Start / next class" parser (AI Teacher) ───────────────────────────────
+# Recognises a generic "start the class" / "open the lecture" / "next chapter" /
+# "क्लास सुरू कर" / "पुढचा धडा" command that does NOT name a chapter number. The
+# caller resolves it against the *selected division's* class and the lecture
+# sequence, so the teacher opens the right video automatically. Explicit
+# "open class 5 chapter 3" still goes through match_lecture_command (it names a
+# number, which excludes it here).
+
+# Nouns that mean "the lesson/class" (English + un-anchored Devanagari for hi/mr).
+_START_NOUN_RE = re.compile(r"\b(class|lesson|lecture|session|chapter|teaching)\b", re.IGNORECASE)
+_START_NOUN_DEV = re.compile(r"वर्ग|तास|क्लास|कक्षा|पाठ|धडा|अध्याय|लेक्चर|लेसन")
+# "Begin/open/resume" verbs (Devanagari verbs are also normalised to open/start/play
+# by _normalize_hindi_keywords, so the English set below catches most after normalise).
+_START_VERB_RE = re.compile(r"\b(start|begin|open|resume|teach|commence|kick\s*off|play|show)\b", re.IGNORECASE)
+_START_VERB_DEV = re.compile(r"शुरू|सुरू|सुरु|चालू|उघड|स्टार्ट|शिकव|घे")
+# "Next / continue" → advance to the following chapter.
+_NEXT_RE = re.compile(r"\b(next|continue|carry\s*on|move\s*on|go\s*on|proceed|onward|following)\b", re.IGNORECASE)
+_NEXT_DEV = re.compile(r"अगला|अगली|पुढचा|पुढील|पुढे|पुढच्या|आगे|नेक्स्ट|कंटिन्यू")
+
+
+def match_start_class_command(text: str) -> Optional[Dict]:
+    """Detect a generic start/continue-class command (no explicit chapter number).
+
+    Returns {"action": "start"} or {"action": "next"}, else None. Kept conservative
+    (short, command-like messages only) so ordinary prose mentioning "class" doesn't
+    trigger a lecture open.
+    """
+    if not text or not text.strip():
+        return None
+    # Command-like = short. Long explanatory prose ("start by explaining the class
+    # of models that …") shouldn't open a lecture.
+    if len(text.split()) > 10:
+        return None
+    norm = _normalize_hindi_keywords(text)
+    has_noun = bool(_START_NOUN_RE.search(norm) or _START_NOUN_DEV.search(text))
+    if not has_noun:
+        return None
+    has_next = bool(_NEXT_RE.search(norm) or _NEXT_DEV.search(text))
+    has_start = bool(_START_VERB_RE.search(norm) or _START_VERB_DEV.search(text)
+                     or _LECTURE_OPEN_VERB_RE.search(norm))
+    if not (has_start or has_next):
+        return None
+    # A specific chapter number → let match_lecture_command handle it instead.
+    if extract_chapter_from_message(text) is not None:
+        return None
+    return {"action": "next" if has_next else "start"}
+
+
+# ─── Revision parser (AI Teacher Phase 2) ───────────────────────────────────
+# "revise chapter 2" / "let's revise the lesson" / "उजळणी करूया" / "फिर से दोहराओ".
+# Re-opens an already-taught chapter and bumps its revision counter, instead of
+# advancing the syllabus.
+
+# STRONG cues mean revision on their own ("उजळणी करूया", "let's revise").
+_REVISE_STRONG_RE = re.compile(r"\b(revise|revision|revisit)\b", re.IGNORECASE)
+_REVISE_STRONG_DEV = re.compile(r"उजळणी|दोहरा|दोहराओ|दोहराएं|पुनरावृत्ती|पुनरावलोकन|रिवीजन")
+# WEAK cues are ambiguous ("repeat that", "पुन्हा सांगा") — they need a lesson noun
+# or a chapter number before we reopen a video.
+_REVISE_WEAK_RE = re.compile(r"\b(recap|repeat)\b", re.IGNORECASE)
+_REVISE_WEAK_DEV = re.compile(r"पुन्हा|फिर से|पुनः")
+
+
+def match_revision_command(text: str) -> Optional[Dict]:
+    """Detect a revision request. Returns {"chapter": int|None} or None.
+
+    `chapter` is None when the class just says "let's revise" — the caller then
+    picks their most recently completed chapter.
+    """
+    if not text or len(text.split()) > 10:
+        return None
+    norm = _normalize_hindi_keywords(text)
+    strong = bool(_REVISE_STRONG_RE.search(norm) or _REVISE_STRONG_DEV.search(text))
+    weak = bool(_REVISE_WEAK_RE.search(norm) or _REVISE_WEAK_DEV.search(text))
+    if not (strong or weak):
+        return None
+    chapter = extract_chapter_from_message(text)
+    if not strong:
+        # Weak cue only — require an explicit lesson reference.
+        has_noun = bool(_START_NOUN_RE.search(norm) or _START_NOUN_DEV.search(text))
+        if chapter is None and not has_noun:
+            return None
+    return {"chapter": chapter}
+
+
+# ─── Assessment + doubt parsers (AI Teacher Phase 3) ─────────────────────────
+# The class asks for a quiz / worksheet / homework / important questions / summary,
+# or raises a doubt. These set a one-shot teacher directive so the LLM produces the
+# content in character and in the division's language.
+
+# Ordered most-specific first (so "important questions" isn't caught as a bare "quiz").
+_ASSESS_PATTERNS = [
+    ("important", re.compile(r"\b(important|imp|key|exam)\s+(questions?|qs)\b", re.IGNORECASE),
+     re.compile(r"महत्त्वाचे\s*प्रश्न|महत्वपूर्ण\s*प्रश्न|महत्वाचे\s*प्रश्न")),
+    ("worksheet", re.compile(r"\bwork\s?sheet\b", re.IGNORECASE),
+     re.compile(r"वर्कशीट|कार्यपत्रिका|वर्क\s*शीट")),
+    ("homework", re.compile(r"\b(home\s?work|assignment)\b", re.IGNORECASE),
+     re.compile(r"गृहपाठ|होमवर्क|घरचा\s*अभ्यास|गृहकार्य")),
+    ("quiz", re.compile(r"\b(quiz|mcq|mcqs|test us|take a test|multiple choice)\b", re.IGNORECASE),
+     re.compile(r"क्विझ|क्विज|प्रश्नमंजुषा|एमसीक्यू|टेस्ट")),
+    ("summary", re.compile(r"\b(summary|summarise|summarize|key points)\b", re.IGNORECASE),
+     re.compile(r"सारांश|थोडक्यात\s*सांग|संक्षेप")),
+]
+
+
+def match_assessment_command(text: str) -> Optional[Dict]:
+    """Detect an assessment request. Returns {"kind": …} or None. Command-like only."""
+    if not text or len(text.split()) > 14:
+        return None
+    norm = _normalize_hindi_keywords(text)
+    for kind, latin_re, dev_re in _ASSESS_PATTERNS:
+        if latin_re.search(norm) or dev_re.search(text):
+            return {"kind": kind}
+    return None
+
+
+# Explicit doubt markers (English + un-anchored Devanagari). We only log a doubt when
+# the class flags it as one — ordinary questions are answered but not logged.
+_DOUBT_MARKER_RE = re.compile(
+    r"\b(i have a doubt|i've a doubt|my doubt is|a doubt|have a question|"
+    r"i have a question|doubt hai|shanka)\b|\bdoubt\s*[:\-]",
+    re.IGNORECASE,
+)
+_DOUBT_MARKER_DEV = re.compile(r"शंका|मला\s*प्रश्न|मेरा\s*सवाल|प्रश्न\s*आहे|एक\s*शंका|शङ्का")
+
+
+def match_doubt_command(text: str) -> Optional[str]:
+    """Return the doubt text if `text` explicitly flags a doubt, else None."""
+    if not text or not text.strip():
+        return None
+    if not (_DOUBT_MARKER_RE.search(text) or _DOUBT_MARKER_DEV.search(text)):
+        return None
+    # Strip a leading "sir, my doubt is: …" style preamble; keep the substance.
+    cleaned = re.sub(
+        r"^\s*(sir|teacher|hello|namaste|excuse me)?[,\s]*"
+        r"(i have|i've|my|a|one|please|can i ask|i want to ask)?\s*"
+        r"(doubt|question|shanka)?\s*(is|:|\-)?\s*",
+        "", text.strip(), flags=re.IGNORECASE,
+    ).strip()
+    return cleaned or text.strip()
 
 
 # ─── Notes command parser ───────────────────────────────────────────────────
