@@ -174,9 +174,27 @@ function _confirmDivision() {
 
 // Called by auth.js once the user is "in" (signed in OR guest/test mode). Renders
 // the pill and, on first entry with no classroom chosen, prompts the picker once.
-function _onAuthResolved() {
+async function _onAuthResolved() {
     _renderDivisionPill();
-    if (!getActiveDivisionId()) openDivisionPicker();
+    if (getActiveDivisionId()) return;
+    // Phase C: if the platform has exactly ONE classroom, bind it silently — there's
+    // nothing to choose, so never interrupt with a picker. Otherwise ask once.
+    await _loadSchoolsTree();
+    const all = [];
+    _schoolsTree.forEach(s => (s.classes || []).forEach(c =>
+        (c.divisions || []).forEach(d => all.push({ s, c, d }))));
+    if (all.length === 1) {
+        const { s, c, d } = all[0];
+        _saveActiveDivision({
+            school_id: s.id, school_name: s.name,
+            class_id: c.id, grade: c.grade, grade_label: _gradeLabel(c.grade),
+            division_id: d.id, division_name: d.name,
+            preferred_language: d.preferred_language || 'en',
+        });
+        _renderDivisionPill();
+        return;
+    }
+    openDivisionPicker();
 }
 
 // Bind picker controls. Called from script.js init() BEFORE _initAuth(), so the

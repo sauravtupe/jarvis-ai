@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, RedirectResponse, Response, JSONResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, Response, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -31,7 +31,8 @@ from app.models import (
     AIPracticalRequest, AIPracticalResponse, AIPracticalTask,
     PracticeGenerateResult, PracticeSaveRequest,
     NotesSaveRequest, NotesRecord,
-    SchoolCreate, ClassCreate, DivisionCreate,
+    SchoolCreate, ClassCreate, DivisionCreate, DivisionLanguageUpdate,
+    DirectUploadRequest,
 )
 
 RATE_LIMIT_MESSAGE = (
@@ -59,6 +60,7 @@ from app.services import practical_service
 from app.services import school_service
 from app.services import progress_service
 from app.services import doubts_service
+from app.services import video_service
 from app.middleware.auth import get_optional_user
 from app.services.storage_service import (
     upload_bytes_to_s3, startup_restore_from_s3,
@@ -77,7 +79,7 @@ from config import (
     ALLOWED_ORIGINS, RATE_LIMIT_ENABLED, RATE_LIMIT_PER_MINUTE,
     CLASSROOM_MODE,
 )
-from app.services.teacher_persona import scrub_persona_breaks
+from app.services.teacher_persona import scrub_persona_breaks, to_classroom_voice
 
 
 
@@ -917,6 +919,12 @@ def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enable
                 yield from _yield_completed_audio()
                 continue
 
+            # Classroom voice: rewrite single-user address ("Sir") to "students" for
+            # BOTH the displayed text and the audio below. Word-boundary anchored, so a
+            # partial chunk can't be corrupted — it simply won't match.
+            if CLASSROOM_MODE:
+                chunk = to_classroom_voice(chunk)
+
             yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
 
             if not tts_enabled:
@@ -1462,6 +1470,8 @@ async def create_lecture(
             title=request.title,
             youtube_url=request.youtube_url,
             overwrite=overwrite,
+            provider=request.provider,
+            video_uid=request.video_uid,
         )
         return LectureRecord(**rec)
     except lecture_service.LectureError as e:
@@ -1481,6 +1491,8 @@ async def update_lecture_endpoint(
             chapter=chapter,
             title=request.title,
             youtube_url=request.youtube_url,
+            provider=request.provider,
+            video_uid=request.video_uid,
         )
         return LectureRecord(**rec)
     except lecture_service.LectureError as e:
@@ -1498,6 +1510,146 @@ async def delete_lecture_endpoint(
         return Response(status_code=204)
     except lecture_service.LectureError as e:
         raise _lecture_error_to_http(e)
+
+
+# ─── Private video hosting — Cloudflare Stream (Workstream A) ───────────────
+
+
+def _video_error_to_http(exc: video_service.VideoError) -> HTTPException:
+    return HTTPException(status_code=getattr(exc, "status_code", 400), detail=str(exc))
+
+
+@app.get("/videos/config")
+async def video_config_endpoint(_: bool = Depends(require_admin)):
+    """Admin — whether private hosting is wired up (drives the upload UI)."""
+    return {
+        "configured": video_service.is_configured(),
+        "can_sign": video_service.can_sign(),
+    }
+
+
+@app.post("/videos/direct-upload")
+async def create_direct_upload_endpoint(
+    request: DirectUploadRequest, _: bool = Depends(require_admin),
+):
+    """Admin — one-time URL so the browser uploads straight to Cloudflare.
+
+    The file never passes through this server, so large lectures don't tie up a
+    worker or hit request-size limits.
+    """
+    try:
+        return video_service.create_direct_upload(request.name, request.max_duration_seconds)
+    except video_service.VideoError as e:
+        raise _video_error_to_http(e)
+
+
+@app.get("/videos/{uid}/status")
+async def video_status_endpoint(uid: str, _: bool = Depends(require_admin)):
+    """Admin — encoding progress / readiness for an uploaded video."""
+    try:
+        return video_service.get_video(uid)
+    except video_service.VideoError as e:
+        raise _video_error_to_http(e)
+
+
+@app.get("/watch/{class_name}/{chapter}", response_class=HTMLResponse)
+async def watch_lecture_page(class_name: str, chapter: int):
+    """Branded, private lecture player — our page, our domain.
+
+    Mints a short-lived signed token server-side and embeds the Cloudflare player.
+    The raw stream is 403 without a token, so the video can't be shared or scraped.
+    """
+    try:
+        lectures = lecture_service.list_lectures()
+    except Exception:
+        lectures = []
+    rec = next((l for l in lectures
+                if l.get("class_name") == class_name and l.get("chapter") == chapter), None)
+    if not rec:
+        return HTMLResponse(_watch_error_html("Lecture not found",
+                                              "This lesson isn't in the catalog yet."), status_code=404)
+    if rec.get("provider") != "cloudflare" or not rec.get("video_uid"):
+        # Legacy YouTube lecture — nothing to serve privately.
+        return HTMLResponse(_watch_error_html(
+            "Not a private lecture",
+            "This lesson is still hosted on YouTube. Re-upload it from the Lectures panel "
+            "to serve it privately."), status_code=409)
+    try:
+        play = video_service.playback(rec["video_uid"])
+    except video_service.VideoError as e:
+        return HTMLResponse(_watch_error_html("Video unavailable", str(e)), status_code=e.status_code)
+
+    class_label = "UKG" if class_name == "UKG" else f"Class {class_name.replace('class_', '')}"
+    return HTMLResponse(_watch_page_html(
+        title=rec.get("title", "Lecture"),
+        subtitle=f"{class_label} · Chapter {chapter}",
+        iframe_url=play["iframe_url"],
+        poster=play["poster_url"],
+    ))
+
+
+def _watch_shell(body: str, title: str) -> str:
+    return f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_html_escape(title)} · Jarvis</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+ *{{box-sizing:border-box;margin:0;padding:0}}
+ body{{background:#05050f;color:#e8e8f8;font-family:'Outfit',system-ui,sans-serif;
+      min-height:100vh;display:flex;flex-direction:column;align-items:center;
+      justify-content:center;padding:24px;
+      background-image:radial-gradient(circle at 20% 20%,rgba(124,106,239,.16),transparent 45%),
+                       radial-gradient(circle at 80% 80%,rgba(84,160,255,.14),transparent 45%)}}
+ .wrap{{width:min(1100px,100%)}}
+ .brand{{font-family:'Orbitron',sans-serif;font-weight:900;letter-spacing:.14em;font-size:.85rem;
+        background:linear-gradient(135deg,#7c6aef,#54a0ff);-webkit-background-clip:text;
+        background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:14px}}
+ h1{{font-size:1.5rem;font-weight:600;margin-bottom:4px;line-height:1.25}}
+ .sub{{color:#a0a0c0;font-size:.85rem;letter-spacing:.05em;margin-bottom:18px}}
+ .player{{position:relative;width:100%;aspect-ratio:16/9;border-radius:16px;overflow:hidden;
+         background:#000;border:1px solid rgba(124,106,239,.25);
+         box-shadow:0 24px 70px rgba(0,0,0,.6)}}
+ .player iframe{{position:absolute;inset:0;width:100%;height:100%;border:0}}
+ .foot{{margin-top:16px;display:flex;gap:8px;align-items:center;color:#8f8fae;font-size:.76rem}}
+ .lock{{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:20px;
+       background:rgba(124,106,239,.14);border:1px solid rgba(124,106,239,.3);color:#b3a5ff}}
+ .msg{{text-align:center;padding:60px 20px}}
+ .msg p{{color:#a0a0c0;margin-top:10px;line-height:1.6}}
+ @media(max-width:600px){{body{{padding:14px}}h1{{font-size:1.15rem}}}}
+</style></head><body><div class="wrap">{body}</div></body></html>"""
+
+
+def _html_escape(s: str) -> str:
+    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _watch_page_html(title: str, subtitle: str, iframe_url: str, poster: str) -> str:
+    body = f"""
+      <div class="brand">J.A.R.V.I.S · AI CLASSROOM</div>
+      <h1>{_html_escape(title)}</h1>
+      <div class="sub">{_html_escape(subtitle)}</div>
+      <div class="player">
+        <iframe src="{_html_escape(iframe_url)}?poster={_html_escape(poster)}"
+                loading="eager" allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture;"
+                allowfullscreen="true" title="{_html_escape(title)}"></iframe>
+      </div>
+      <div class="foot">
+        <span class="lock">&#128274; Private lesson</span>
+        <span>Streamed securely for your classroom. When you're done, return to Jarvis and say
+        &ldquo;I'm done&rdquo;.</span>
+      </div>"""
+    return _watch_shell(body, title)
+
+
+def _watch_error_html(heading: str, detail: str) -> str:
+    body = f"""
+      <div class="msg">
+        <div class="brand">J.A.R.V.I.S · AI CLASSROOM</div>
+        <h1>{_html_escape(heading)}</h1>
+        <p>{_html_escape(detail)}</p>
+      </div>"""
+    return _watch_shell(body, heading)
 
 
 # ─── AI Teacher Phase 1 — School / Class / Division identity ────────────────
@@ -1559,6 +1711,20 @@ async def create_division_endpoint(
         raise _school_error_to_http(e)
 
 
+@app.put("/schools/{school_id}/classes/{class_id}/divisions/{division_id}/language")
+async def set_division_language_endpoint(
+    school_id: str, class_id: str, division_id: str,
+    request: DivisionLanguageUpdate, _: bool = Depends(require_admin),
+):
+    """Admin — change a division's language of instruction (en | hi | mr)."""
+    try:
+        return school_service.set_division_language(
+            school_id, class_id, division_id, request.preferred_language
+        )
+    except school_service.SchoolError as e:
+        raise _school_error_to_http(e)
+
+
 @app.delete("/schools/{school_id}/classes/{class_id}/divisions/{division_id}", status_code=204)
 async def delete_division_endpoint(
     school_id: str, class_id: str, division_id: str, _: bool = Depends(require_admin),
@@ -1614,6 +1780,89 @@ async def clear_division_doubts_endpoint(division_id: str, _: bool = Depends(req
     """Admin — clear all doubts for a division."""
     doubts_service.clear_doubts(division_id)
     return Response(status_code=204)
+
+
+@app.get("/admin/dashboard")
+async def admin_dashboard_endpoint(_: bool = Depends(require_admin)):
+    """Admin — single aggregated snapshot for the Phase 4 dashboard.
+
+    Walks every School -> Class -> Division once and joins in each division's
+    curriculum progress + open-doubt count, plus platform-wide totals. One call so
+    the dashboard doesn't fan out to N per-division requests.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    rows = []
+    pct_sum = 0
+    total_open_doubts = 0
+    total_assessments = 0
+    active_7d = 0
+    class_count = 0
+
+    schools = school_service.list_schools()
+    for school in schools:
+        for klass in school.get("classes", []):
+            class_count += 1
+            class_name = school_service.grade_to_class_name(klass.get("grade", ""))
+            chapters = lecture_service.list_lectures_for_class(class_name)
+            for div in klass.get("divisions", []):
+                div_id = div.get("id", "")
+                prog = progress_service.summary(div_id, chapters)
+                total = prog.get("total_chapters", 0) or 0
+                done = prog.get("completed_count", 0) or 0
+                pct = round((done / total) * 100) if total else 0
+                open_doubts = doubts_service.open_count(div_id)
+                assessments = prog.get("assessments_count", 0) or 0
+                last_active = prog.get("last_active_at", "") or ""
+
+                pct_sum += pct
+                total_open_doubts += open_doubts
+                total_assessments += assessments
+                if _is_within_days(last_active, 7, now):
+                    active_7d += 1
+
+                rows.append({
+                    "division_id": div_id,
+                    "school_name": school.get("name", ""),
+                    "grade_label": "UKG" if klass.get("grade") == "UKG" else f"Class {klass.get('grade', '')}",
+                    "division_name": div.get("name", ""),
+                    "preferred_language": div.get("preferred_language", "en"),
+                    "total_chapters": total,
+                    "completed_count": done,
+                    "completion_pct": pct,
+                    "current_chapter": prog.get("current_chapter"),
+                    "next_chapter": prog.get("next_chapter"),
+                    "next_title": prog.get("next_title", ""),
+                    "open_doubts": open_doubts,
+                    "assessments_count": assessments,
+                    "last_active_at": last_active,
+                })
+
+    div_count = len(rows)
+    return {
+        "generated_at": now.isoformat(),
+        "totals": {
+            "schools": len(schools),
+            "classes": class_count,
+            "divisions": div_count,
+            "avg_completion_pct": round(pct_sum / div_count) if div_count else 0,
+            "total_open_doubts": total_open_doubts,
+            "total_assessments": total_assessments,
+            "active_7d": active_7d,
+        },
+        "divisions": rows,
+    }
+
+
+def _is_within_days(iso_ts: str, days: int, now) -> bool:
+    if not iso_ts:
+        return False
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(iso_ts)
+        return (now - dt).total_seconds() <= days * 86400
+    except Exception:
+        return False
 
 
 # ─── Feature 9 — Practical Exercises ────────────────────────────────────────

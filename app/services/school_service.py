@@ -326,6 +326,28 @@ def add_division(school_id: str, class_id: str, name: str, preferred_language: s
     return div
 
 
+def set_division_language(school_id: str, class_id: str, division_id: str, preferred_language: str) -> Dict:
+    """Change a division's language of instruction (en | hi | mr)."""
+    language = _validate_language(preferred_language)
+    with _lock:
+        data = _load()
+        school = _find_school(data, school_id)
+        if not school:
+            raise SchoolError("School not found", 404)
+        klass = _find_class(school, class_id)
+        if not klass:
+            raise SchoolError("Class not found", 404)
+        div = _find_division(klass, division_id)
+        if not div:
+            raise SchoolError("Division not found", 404)
+        div["preferred_language"] = language
+        div["updated_at"] = _now()
+        school["updated_at"] = div["updated_at"]
+        _atomic_write(data)
+    logger.info("[SCHOOL] Division %s language → %s", division_id, language)
+    return div
+
+
 def delete_division(school_id: str, class_id: str, division_id: str) -> None:
     with _lock:
         data = _load()
@@ -342,6 +364,38 @@ def delete_division(school_id: str, class_id: str, division_id: str) -> None:
         school["updated_at"] = _now()
         _atomic_write(data)
     logger.info("[SCHOOL] Deleted division %s from class %s", division_id, class_id)
+
+
+def list_all_divisions() -> List[Dict]:
+    """Flat list of every division's full context across all schools."""
+    out: List[Dict] = []
+    for school in list_schools():
+        for klass in school.get("classes", []):
+            grade = klass.get("grade", "")
+            for div in klass.get("divisions", []):
+                out.append({
+                    "school_id": school.get("id", ""),
+                    "school_name": school.get("name", ""),
+                    "class_id": klass.get("id", ""),
+                    "grade": grade,
+                    "grade_label": "UKG" if grade == "UKG" else f"Class {grade}",
+                    "class_name": grade_to_class_name(grade),
+                    "division_id": div.get("id", ""),
+                    "division_name": div.get("name", ""),
+                    "preferred_language": div.get("preferred_language", "en"),
+                })
+    return out
+
+
+def get_sole_division() -> Optional[Dict]:
+    """The one division's context if the platform has EXACTLY one, else None.
+
+    Lets a single-classroom device answer "start the lecture" immediately instead of
+    asking which class it is — there is only one possible answer. With 2+ divisions we
+    return None, because guessing would be wrong.
+    """
+    divisions = list_all_divisions()
+    return divisions[0] if len(divisions) == 1 else None
 
 
 # NOTE: per-division curriculum progress (current chapter, completions, revisions)

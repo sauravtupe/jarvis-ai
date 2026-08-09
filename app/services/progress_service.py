@@ -63,12 +63,21 @@ def _atomic_write(data: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, PROGRESS_JSON_PATH)
-    try:
-        from app.services.storage_service import upload_bytes_to_s3
-        payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
-        upload_bytes_to_s3(payload, _STORAGE_KEY, content_type="application/json")
-    except Exception as e:
-        logger.warning("[PROGRESS] Durable sync of division_progress.json failed: %s", e)
+    # Durable sync runs OFF the request path: progress is written locally above (that's
+    # the source of truth for this container), and the S3/HF copy is only the
+    # rebuild-survival backup. Uploading inline added ~1s to every "start the lecture".
+    payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    _sync_durable_async(payload)
+
+
+def _sync_durable_async(payload: bytes) -> None:
+    def _upload():
+        try:
+            from app.services.storage_service import upload_bytes_to_s3
+            upload_bytes_to_s3(payload, _STORAGE_KEY, content_type="application/json")
+        except Exception as e:
+            logger.warning("[PROGRESS] Durable sync of division_progress.json failed: %s", e)
+    threading.Thread(target=_upload, daemon=True).start()
 
 
 def _now() -> str:

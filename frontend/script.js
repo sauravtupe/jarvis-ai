@@ -285,6 +285,7 @@ function init() {
     setMode(currentMode);
     autoResizeInput();
     if (typeof _initSchoolUI === 'function') _initSchoolUI();  // bind classroom picker before auth may open it
+    if (typeof _initDashboardUI === 'function') _initDashboardUI();
     _initAuthUI();
     _initAuth();
     _maybeStartWakeWord();
@@ -1462,13 +1463,18 @@ async function sendMessage(textOverride) {
                         // Pause speech recognition — the video's audio leaks through the speakers
                         // and the mic would otherwise transcribe it as user input (loop).
                         _enterVideoWatchMode();
-                        // Open in our own full-bleed fullscreen player (no YouTube
-                        // sidebar/recommendations) when we have the video id; the player
-                        // auto-falls back to youtube.com if the video can't be embedded.
-                        const _ytPlayerUrl = data.youtube_detected.video_id
-                            ? `${window.location.origin}/app/player.html?v=${encodeURIComponent(data.youtube_detected.video_id)}`
-                            : data.youtube_detected.url;
-                        window.open(_ytPlayerUrl, '_blank');
+                        // Private (Cloudflare) lectures already carry OUR branded /watch
+                        // URL — open it as-is. YouTube lectures still go through our
+                        // full-bleed player (no sidebar/recommendations).
+                        let _openUrl;
+                        if (data.youtube_detected.provider === 'cloudflare') {
+                            _openUrl = new URL(data.youtube_detected.url, window.location.origin).href;
+                        } else {
+                            _openUrl = data.youtube_detected.video_id
+                                ? `${window.location.origin}/app/player.html?v=${encodeURIComponent(data.youtube_detected.video_id)}`
+                                : data.youtube_detected.url;
+                        }
+                        window.open(_openUrl, '_blank');
                     }
                     if (data.interactive_choice && data.interactive_choice.type === 'youtube_analysis') {
                         // User signalled "done" — server acknowledged. Resume mic if it was on.

@@ -92,6 +92,9 @@ def list_lectures() -> List[Dict]:
                 "class_name": class_name,
                 "chapter": chapter_num,
                 "title": rec.get("title", ""),
+                # Legacy rows have no "provider" — they're YouTube by definition.
+                "provider": rec.get("provider", "youtube"),
+                "video_uid": rec.get("video_uid", ""),
                 "youtube_url": rec.get("youtube_url", ""),
                 "video_id": rec.get("video_id", ""),
                 "notes_url": rec.get("notes_url", ""),
@@ -114,19 +117,33 @@ def find_lecture_by_video_id(video_id: str) -> Optional[Dict]:
         return None
     class_name, chapter = slot
     rec = _load_catalog().get(class_name, {}).get(f"chapter_{chapter}")
+    rec = rec if isinstance(rec, dict) else {}
     return {
         "class_name": class_name,
         "chapter": chapter,
-        "title": rec.get("title", "") if isinstance(rec, dict) else "",
+        "title": rec.get("title", ""),
+        "provider": rec.get("provider", "youtube"),
+        "video_uid": rec.get("video_uid", ""),
     }
+
+
+def has_playable_video(rec: Dict) -> bool:
+    """True when a lecture row carries a playable video on either provider."""
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("provider") == "cloudflare":
+        return bool(rec.get("video_uid"))
+    return bool(rec.get("video_id"))
 
 
 def list_lectures_for_class(class_name: str) -> List[Dict]:
     """Chapters that have a saved video for one class, sorted ascending by chapter.
 
     Used by the AI-Teacher "start / next class" flow to walk the lecture sequence.
+    Provider-agnostic: YouTube and Cloudflare lectures sit in the same sequence.
     """
-    out = [l for l in list_lectures() if l.get("class_name") == class_name and l.get("video_id")]
+    out = [l for l in list_lectures()
+           if l.get("class_name") == class_name and has_playable_video(l)]
     out.sort(key=lambda r: r["chapter"])
     return out
 
@@ -171,7 +188,28 @@ def _validate_url(url: str) -> Tuple[str, str]:
     return get_full_url(url) or f"https://www.youtube.com/watch?v={video_id}", video_id
 
 
-def add_lecture(class_name: str, chapter: int, title: str, youtube_url: str, overwrite: bool = False) -> Dict:
+def _validate_video_source(youtube_url: str = "", provider: str = "youtube", video_uid: str = ""):
+    """Resolve the video fields for either provider.
+
+    Returns the dict of video fields to store. Raises LectureError when the source
+    is missing or malformed.
+    """
+    provider = (provider or "youtube").strip().lower()
+    if provider == "cloudflare":
+        from app.services import video_service
+        try:
+            uid = video_service.validate_uid(video_uid)
+        except video_service.VideoError as e:
+            raise LectureError(str(e), getattr(e, "status_code", 422))
+        return {"provider": "cloudflare", "video_uid": uid, "youtube_url": "", "video_id": ""}
+    if provider != "youtube":
+        raise LectureError("provider must be 'youtube' or 'cloudflare'", 422)
+    normalised_url, video_id = _validate_url(youtube_url)
+    return {"provider": "youtube", "youtube_url": normalised_url, "video_id": video_id, "video_uid": ""}
+
+
+def add_lecture(class_name: str, chapter: int, title: str, youtube_url: str = "",
+                overwrite: bool = False, provider: str = "youtube", video_uid: str = "") -> Dict:
     """Add a new lecture. Raises LectureError(409) if slot exists and overwrite=False."""
     _validate_class(class_name)
     chapter_key = _validate_chapter(chapter)
@@ -179,7 +217,7 @@ def add_lecture(class_name: str, chapter: int, title: str, youtube_url: str, ove
         raise LectureError("Title is required", 422)
     if len(title) > 120:
         raise LectureError("Title must be 120 characters or fewer", 422)
-    normalised_url, video_id = _validate_url(youtube_url)
+    video_fields = _validate_video_source(youtube_url, provider, video_uid)
 
     with _lock:
         catalog = _load_catalog()
@@ -196,10 +234,9 @@ def add_lecture(class_name: str, chapter: int, title: str, youtube_url: str, ove
         record = dict(existing) if isinstance(existing, dict) else {}
         record.update({
             "title": title.strip(),
-            "youtube_url": normalised_url,
-            "video_id": video_id,
             "created_at": created_at,
             "updated_at": now,
+            **video_fields,
         })
         catalog.setdefault(class_name, {})[chapter_key] = record
         _atomic_write(catalog)
@@ -212,7 +249,8 @@ def add_lecture(class_name: str, chapter: int, title: str, youtube_url: str, ove
     }
 
 
-def update_lecture(class_name: str, chapter: int, title: str, youtube_url: str) -> Dict:
+def update_lecture(class_name: str, chapter: int, title: str, youtube_url: str = "",
+                   provider: str = "youtube", video_uid: str = "") -> Dict:
     """Update an existing slot. Raises LectureError(404) if missing."""
     _validate_class(class_name)
     chapter_key = _validate_chapter(chapter)
@@ -220,7 +258,7 @@ def update_lecture(class_name: str, chapter: int, title: str, youtube_url: str) 
         raise LectureError("Title is required", 422)
     if len(title) > 120:
         raise LectureError("Title must be 120 characters or fewer", 422)
-    normalised_url, video_id = _validate_url(youtube_url)
+    video_fields = _validate_video_source(youtube_url, provider, video_uid)
 
     with _lock:
         catalog = _load_catalog()
@@ -233,10 +271,9 @@ def update_lecture(class_name: str, chapter: int, title: str, youtube_url: str) 
         record = dict(existing) if isinstance(existing, dict) else {}
         record.update({
             "title": title.strip(),
-            "youtube_url": normalised_url,
-            "video_id": video_id,
             "created_at": existing.get("created_at", datetime.now(timezone.utc).isoformat()),
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            **video_fields,
         })
         catalog[class_name][chapter_key] = record
         _atomic_write(catalog)
@@ -398,7 +435,11 @@ def get_notes(class_name: str, chapter: int) -> Optional[Dict]:
 
 
 def _find_slot_by_video_id(video_id: str) -> Optional[Tuple[str, int]]:
-    """Return (class_name, chapter) for a saved lecture matching video_id, or None."""
+    """Return (class_name, chapter) for a saved lecture matching a video id/uid.
+
+    Accepts a YouTube video_id or a Cloudflare video_uid, so progress crediting and
+    notes lookup work identically on both providers.
+    """
     if not video_id:
         return None
     catalog = _load_catalog()
@@ -406,7 +447,9 @@ def _find_slot_by_video_id(video_id: str) -> Optional[Tuple[str, int]]:
         if not isinstance(chapters, dict):
             continue
         for chapter_key, rec in chapters.items():
-            if isinstance(rec, dict) and rec.get("video_id") == video_id:
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("video_id") == video_id or rec.get("video_uid") == video_id:
                 try:
                     return cls, int(chapter_key.replace("chapter_", ""))
                 except (ValueError, AttributeError):
@@ -665,6 +708,8 @@ def match_lecture_command(text: str) -> Optional[Dict]:
         "chapter": chapter,
         "chapter_key": chapter_key,
         "title": record.get("title", ""),
+        "provider": record.get("provider", "youtube"),
+        "video_uid": record.get("video_uid", ""),
         "youtube_url": record.get("youtube_url", ""),
         "video_id": record.get("video_id", ""),
     }
@@ -678,16 +723,30 @@ def match_lecture_command(text: str) -> Optional[Dict]:
 # "open class 5 chapter 3" still goes through match_lecture_command (it names a
 # number, which excludes it here).
 
-# Nouns that mean "the lesson/class" (English + un-anchored Devanagari for hi/mr).
-_START_NOUN_RE = re.compile(r"\b(class|lesson|lecture|session|chapter|teaching)\b", re.IGNORECASE)
-_START_NOUN_DEV = re.compile(r"वर्ग|तास|क्लास|कक्षा|पाठ|धडा|अध्याय|लेक्चर|लेसन")
-# "Begin/open/resume" verbs (Devanagari verbs are also normalised to open/start/play
+# Nouns that mean "the lesson/class/video" (English + un-anchored Devanagari for hi/mr).
+# "video" is included so "open the video lecture" / "play the video" resolve to the
+# current syllabus lesson rather than falling through to the brain.
+_START_NOUN_RE = re.compile(
+    r"\b(class|lesson|lecture|session|chapter|teaching|video|syllabus|topic)\b", re.IGNORECASE
+)
+_START_NOUN_DEV = re.compile(r"वर्ग|तास|क्लास|कक्षा|पाठ|धडा|अध्याय|लेक्चर|लेसन|व्हिडिओ|व्हिडीओ|वीडियो")
+# "Begin / open / resume" verbs (Devanagari verbs are also normalised to open/start/play
 # by _normalize_hindi_keywords, so the English set below catches most after normalise).
-_START_VERB_RE = re.compile(r"\b(start|begin|open|resume|teach|commence|kick\s*off|play|show)\b", re.IGNORECASE)
-_START_VERB_DEV = re.compile(r"शुरू|सुरू|सुरु|चालू|उघड|स्टार्ट|शिकव|घे")
-# "Next / continue" → advance to the following chapter.
-_NEXT_RE = re.compile(r"\b(next|continue|carry\s*on|move\s*on|go\s*on|proceed|onward|following)\b", re.IGNORECASE)
-_NEXT_DEV = re.compile(r"अगला|अगली|पुढचा|पुढील|पुढे|पुढच्या|आगे|नेक्स्ट|कंटिन्यू")
+#
+# NOTE: "continue / carry on / resume / proceed" live HERE, not in _NEXT_RE. They mean
+# "pick up where we left off", and resolve_target("start") already advances to the next
+# uncompleted chapter when the current one is finished — so routing them to "start"
+# handles BOTH cases correctly and can never skip an unfinished lesson.
+_START_VERB_RE = re.compile(
+    r"\b(start|begin|open|resume|continue|carry\s*on|proceed|teach|commence|"
+    r"kick\s*off|play|show|launch|put\s*on|"
+    r"chalu|chaalu|suru|shuru|lav|lava)\b",   # romanized hi/mr, typed or mis-heard
+    re.IGNORECASE,
+)
+_START_VERB_DEV = re.compile(r"शुरू|सुरू|सुरु|चालू|उघड|स्टार्ट|शिकव|घे|लाव|दाखवा|प्ले")
+# Explicit advancement only → skip to the FOLLOWING chapter.
+_NEXT_RE = re.compile(r"\b(next|following|onward|advance)\b", re.IGNORECASE)
+_NEXT_DEV = re.compile(r"अगला|अगली|पुढचा|पुढील|पुढचं|पुढे|पुढच्या|आगे|नेक्स्ट")
 
 
 def match_start_class_command(text: str) -> Optional[Dict]:

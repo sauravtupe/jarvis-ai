@@ -142,6 +142,44 @@ _DOUBT_DIRECTIVE = (
 )
 
 
+# ─── Classroom fast-path routing (speed: skips the ~1s brain classifier) ─────
+# In CLASSROOM_MODE the assistant is a teacher answering AI questions, so the brain
+# classifier returns GENERAL for nearly every message — yet costs ~1s each time.
+# We only pay for it when the message actually shows a TASK / REALTIME signal.
+# Conservative by design: any hint of a non-general intent falls back to the brain,
+# so routing accuracy is unchanged; only the obvious teaching turns skip it.
+_BRAIN_NEEDED_RE = re.compile(
+    r"\b("
+    # TASK — image generation / opening things / playing media / searching
+    r"generate|create|draw|paint|design|make\s+(me\s+)?(an?\s+)?(image|picture|photo|logo)|"
+    r"image\s+of|picture\s+of|photo\s+of|wallpaper|"
+    r"open|launch|browse|website|google|youtube|play\s+(a\s+)?(song|music|video)|"
+    r"search|look\s+up|find\s+online|"
+    # REALTIME — anything needing fresh web data
+    r"latest|news|headline|today'?s|current|right\s+now|live|weather|temperature|"
+    r"price|stock|score|match|election|who\s+won|this\s+week|"
+    # CAMERA / vision
+    r"camera|what\s+do\s+you\s+see|look\s+at\s+(this|the)|take\s+a\s+(photo|picture)"
+    r")\b",
+    re.IGNORECASE,
+)
+# Devanagari equivalents (un-anchored — \b is ASCII-only).
+_BRAIN_NEEDED_DEV = re.compile(
+    r"बनाओ|बनवा|चित्र|फोटो|तस्वीर|इमेज|"          # image generation
+    r"खोलो|उघड|ओपन|यूट्यूब|गाना|गाणे|"            # open / play
+    r"खबर|बातम्या|समाचार|ताज़ा|आजच|हवामान|मौसम|भाव|किंमत"  # realtime
+)
+
+
+def needs_brain_routing(text: str, has_image: bool = False) -> bool:
+    """True when a message may not be a plain teaching turn and needs the classifier."""
+    if has_image:
+        return True
+    if not text or not text.strip():
+        return True
+    return bool(_BRAIN_NEEDED_RE.search(text) or _BRAIN_NEEDED_DEV.search(text))
+
+
 def match_language_command(text: str) -> Optional[str]:
     """Return 'en' | 'hi' | 'mr' if `text` is a language-switch command, else None.
 
@@ -375,14 +413,18 @@ class ChatService:
 
     def _handle_youtube_video(
         self, session_id: str, video_id: str, full_url: Optional[str], friendly_text: Optional[str] = None,
-        lecture_title: str = "",
+        lecture_title: str = "", provider: str = "youtube",
     ) -> Iterator[Union[str, Dict[str, Any]]]:
-        """Shared YouTube-detection flow.
+        """Shared lecture-open flow for BOTH video providers.
 
-        Sets pending_youtube, kicks off a background transcript fetch, yields
-        the _youtube_detected event, then yields the friendly response and
-        saves the chat session. Used by both the YouTube URL detection branch
-        and the Feature 8 lecture command branch.
+        Sets pending_youtube (the session key the quiz/summary/return flow already
+        keys off — kept for compatibility), kicks off a background transcript fetch,
+        yields the open event, then the friendly response, then saves.
+
+        `provider`:
+          - "youtube"    → `full_url` is the YouTube watch URL (legacy behaviour).
+          - "cloudflare" → `video_id` is the Cloudflare UID and `full_url` is OUR
+            branded /watch page. The raw stream is never exposed to the client.
         """
         from app.services import quiz_service as _qs
 
@@ -391,18 +433,21 @@ class ChatService:
             "transcript": None,
             "status": "fetching",
             "lecture_title": lecture_title,
+            "provider": provider,
         })
 
-        def _fetch_bg(_vid=video_id, _sid=session_id, _title=lecture_title):
+        def _fetch_bg(_vid=video_id, _sid=session_id, _title=lecture_title, _prov=provider):
             try:
-                _t = _qs.get_transcript(_vid)
+                _t = _qs.get_transcript(_vid, provider=_prov)
                 self.set_session_metadata(_sid, "pending_youtube", {
                     "video_id": _vid,
                     "transcript": _t,
                     "status": "ready",
                     "lecture_title": _title,
+                    "provider": _prov,
                 })
-                logger.info("[YOUTUBE] Background transcript ready for %s: %d chars", _vid, len(_t))
+                logger.info("[LECTURE-VIDEO] Background transcript ready for %s (%s): %d chars",
+                            _vid, _prov, len(_t))
             except Exception as _e:
                 self.set_session_metadata(_sid, "pending_youtube", {
                     "video_id": _vid,
@@ -410,12 +455,16 @@ class ChatService:
                     "status": "failed",
                     "error": str(_e),
                     "lecture_title": _title,
+                    "provider": _prov,
                 })
-                logger.warning("[YOUTUBE] Background transcript failed for %s: %s", _vid, _e)
+                logger.warning("[LECTURE-VIDEO] Background transcript failed for %s (%s): %s",
+                               _vid, _prov, _e)
 
         threading.Thread(target=_fetch_bg, daemon=True).start()
 
-        yield {"_youtube_detected": {"video_id": video_id, "url": full_url}}
+        # Same event name for both providers so the frontend has one handler; it just
+        # opens `url` in a new tab. For Cloudflare that's our private watch page.
+        yield {"_youtube_detected": {"video_id": video_id, "url": full_url, "provider": provider}}
         resp = friendly_text or (
             "I've opened the video for you, Sir. Watch the full video and come back when you're done "
             "— I'll generate MCQs, a summary, or answer any questions you have about it."
@@ -423,6 +472,19 @@ class ChatService:
         self.sessions[session_id][-1].content = resp
         yield resp
         self.save_chat_session(session_id)
+
+    @staticmethod
+    def _lecture_open_args(rec: dict):
+        """(video_ref, open_url, provider) for a lecture row, per provider.
+
+        Cloudflare lectures open on our own /watch/{class}/{chapter} page — the
+        signed stream URL is minted server-side there and never sent to the client.
+        """
+        provider = rec.get("provider", "youtube")
+        if provider == "cloudflare":
+            url = f"/watch/{rec.get('class_name', '')}/{rec.get('chapter', '')}"
+            return rec.get("video_uid", ""), url, "cloudflare"
+        return rec.get("video_id", ""), rec.get("youtube_url", ""), "youtube"
 
     def process_message_stream(
         self, session_id: str, user_message: str
@@ -541,6 +603,30 @@ class ChatService:
         logger.info("[JARVIS-STREAM] Session %s → division %s (%s / %s, lang=%s)",
                     session_id[:12], division_id, info.get("school_name", ""),
                     info.get("grade_label", ""), lang)
+
+    def _ensure_division(self, session_id: str):
+        """Resolve the active classroom, auto-binding when there's only one possible.
+
+        Returns (division_id, division_context) or (None, {}). Phase C: a device with a
+        single division never has to be asked "which class?" — there is exactly one
+        answer, so we bind it silently and act on the command immediately.
+        """
+        div_id = self.get_session_metadata(session_id, "active_division_id")
+        div_ctx = self.get_session_metadata(session_id, "division_context") or {}
+        if div_id and div_ctx.get("class_name"):
+            return div_id, div_ctx
+        try:
+            from app.services import school_service
+            sole = school_service.get_sole_division()
+        except Exception as e:
+            logger.warning("[AI-TEACHER] sole-division lookup failed: %s", e)
+            return None, {}
+        if not sole:
+            return None, {}
+        self._apply_active_division(session_id, sole["division_id"])
+        logger.info("[AI-TEACHER] Auto-bound sole division %s (%s %s)",
+                    sole["division_id"], sole.get("grade_label", ""), sole.get("division_name", ""))
+        return sole["division_id"], sole
 
     def _teacher_lang(self, session_id: str) -> str:
         """Active classroom language ('en'|'hi'|'mr') for canned teacher lines."""
@@ -682,12 +768,10 @@ class ChatService:
         # untouched when no classroom is selected, so nothing regresses outside teacher mode.
         if CLASSROOM_MODE:
             _rev_cmd = _ls.match_revision_command(user_message)
-            _rev_div = self.get_session_metadata(session_id, "active_division_id")
-            _rev_ctx = self.get_session_metadata(session_id, "division_context") or {}
+            _rev_div, _rev_ctx = self._ensure_division(session_id) if _rev_cmd else (None, {})
             if _rev_cmd and _rev_div and _rev_ctx.get("class_name"):
                 from app.services import progress_service as _prog
-                _lang = self.get_session_metadata(session_id, "conversation_lang") or "en"
-                _lang = _lang if _lang in ("en", "hi", "mr") else "en"
+                _lang = self._teacher_lang(session_id)
                 _cls_label = _rev_ctx.get("grade_label") or _rev_ctx["class_name"]
                 _chapters = _ls.list_lectures_for_class(_rev_ctx["class_name"])
                 _want = _rev_cmd.get("chapter")
@@ -717,9 +801,10 @@ class ChatService:
                 )
                 logger.info("[AI-TEACHER] Revision → %s ch %d for div %s",
                             _rev_ctx["class_name"], _target["chapter"], _rev_div)
+                _ref, _url, _prov = self._lecture_open_args(_target)
                 yield from self._handle_youtube_video(
-                    session_id, _target["video_id"], _target["youtube_url"],
-                    friendly_text=_friendly, lecture_title=_target.get("title", ""),
+                    session_id, _ref, _url, friendly_text=_friendly,
+                    lecture_title=_target.get("title", ""), provider=_prov,
                 )
                 return
 
@@ -760,9 +845,10 @@ class ChatService:
                 f"Opening Class {_lec['class_num']} Chapter {_lec['chapter']} — {_lec['title']}, Sir. "
                 f"Watch the full video and come back when you're done."
             )
+            _ref, _url, _prov = self._lecture_open_args(_lec)
             yield from self._handle_youtube_video(
-                session_id, _lec["video_id"], _lec["youtube_url"],
-                friendly_text=_friendly, lecture_title=_lec.get("title", ""),
+                session_id, _ref, _url, friendly_text=_friendly,
+                lecture_title=_lec.get("title", ""), provider=_prov,
             )
             return
 
@@ -774,10 +860,9 @@ class ChatService:
         if CLASSROOM_MODE:
             _start_cmd = _ls.match_start_class_command(user_message)
             if _start_cmd:
-                _lang = self.get_session_metadata(session_id, "conversation_lang") or "en"
-                _lang = _lang if _lang in ("en", "hi", "mr") else "en"
-                _active_div = self.get_session_metadata(session_id, "active_division_id")
-                _div_ctx = self.get_session_metadata(session_id, "division_context") or {}
+                # Phase C: auto-bind a lone classroom so the command runs immediately.
+                _active_div, _div_ctx = self._ensure_division(session_id)
+                _lang = self._teacher_lang(session_id)
                 if not _active_div or not _div_ctx.get("class_name"):
                     _resp = _START_NEEDS_DIVISION[_lang]
                     self.sessions[session_id][-1].content = _resp
@@ -813,9 +898,10 @@ class ChatService:
                 )
                 logger.info("[AI-TEACHER] Start-class (%s) → %s ch %d for div %s",
                             _start_cmd["action"], _div_ctx["class_name"], _target["chapter"], _active_div)
+                _ref, _url, _prov = self._lecture_open_args(_target)
                 yield from self._handle_youtube_video(
-                    session_id, _target["video_id"], _target["youtube_url"],
-                    friendly_text=_friendly, lecture_title=_target.get("title", ""),
+                    session_id, _ref, _url, friendly_text=_friendly,
+                    lecture_title=_target.get("title", ""), provider=_prov,
                 )
                 return
 
@@ -885,36 +971,37 @@ class ChatService:
         # "quiz"/"worksheet" as a TASK (image/content) intent.
         force_general = False
         if CLASSROOM_MODE:
-            _a_div = self.get_session_metadata(session_id, "active_division_id")
-            _a_ctx = self.get_session_metadata(session_id, "division_context") or {}
-            if _a_div and _a_ctx.get("class_name"):
-                _doubt_text = _ls.match_doubt_command(user_message)
-                _assess = None if _doubt_text else _ls.match_assessment_command(user_message)
-                if _doubt_text:
-                    try:
-                        from app.services import doubts_service as _ds
-                        _, _dchap = self._current_topic(_a_div, _a_ctx)
-                        _ds.record_doubt(_a_div, _dchap, _doubt_text)
-                    except Exception as _de:
-                        logger.warning("[AI-TEACHER] doubt log failed: %s", _de)
-                    self.set_session_metadata(
-                        session_id, "teacher_directive",
-                        _DOUBT_DIRECTIVE.format(doubt=_doubt_text[:400]),
-                    )
-                    force_general = True
-                elif _assess:
-                    _topic, _achap = self._current_topic(_a_div, _a_ctx)
-                    self.set_session_metadata(
-                        session_id, "teacher_directive",
-                        _ASSESS_DIRECTIVE[_assess["kind"]].format(topic=_topic or "the current AI topic"),
-                    )
-                    force_general = True
-                    if _achap is not None:
+            # Match first (cheap regex), resolve the classroom only if something fired.
+            _doubt_text = _ls.match_doubt_command(user_message)
+            _assess = None if _doubt_text else _ls.match_assessment_command(user_message)
+            if _doubt_text or _assess:
+                _a_div, _a_ctx = self._ensure_division(session_id)
+                if _a_div and _a_ctx.get("class_name"):
+                    if _doubt_text:
                         try:
-                            from app.services import progress_service as _prog
-                            _prog.record_assessment(_a_div, _achap, _assess["kind"])
-                        except Exception as _ae:
-                            logger.warning("[AI-TEACHER] assessment log failed: %s", _ae)
+                            from app.services import doubts_service as _ds
+                            _, _dchap = self._current_topic(_a_div, _a_ctx)
+                            _ds.record_doubt(_a_div, _dchap, _doubt_text)
+                        except Exception as _de:
+                            logger.warning("[AI-TEACHER] doubt log failed: %s", _de)
+                        self.set_session_metadata(
+                            session_id, "teacher_directive",
+                            _DOUBT_DIRECTIVE.format(doubt=_doubt_text[:400]),
+                        )
+                        force_general = True
+                    elif _assess:
+                        _topic, _achap = self._current_topic(_a_div, _a_ctx)
+                        self.set_session_metadata(
+                            session_id, "teacher_directive",
+                            _ASSESS_DIRECTIVE[_assess["kind"]].format(topic=_topic or "the current AI topic"),
+                        )
+                        force_general = True
+                        if _achap is not None:
+                            try:
+                                from app.services import progress_service as _prog
+                                _prog.record_assessment(_a_div, _achap, _assess["kind"])
+                            except Exception as _ae:
+                                logger.warning("[AI-TEACHER] assessment log failed: %s", _ae)
 
         # --- Practical command detection (pre-brain shortcut, Feature 9) ---
         # Runs BEFORE the practice-PDF block because it's more specific (needs class + chapter).
@@ -1040,6 +1127,12 @@ class ChatService:
         if force_general:
             # Assessment / doubt directive is pending — keep it on the teacher LLM route.
             category, primary_method = CATEGORY_GENERAL, "teacher"
+        elif (CLASSROOM_MODE and not is_upload_message and not imgbase64
+              and not needs_brain_routing(user_message, has_image=bool(imgbase64))):
+            # Speed fast-path: a plain teaching turn. The classifier would spend ~1s to
+            # answer GENERAL, so skip it. Anything showing a task/realtime/vision signal
+            # still goes through the brain below.
+            category, primary_method = CATEGORY_GENERAL, "fastpath"
         elif not is_upload_message and self.brain_service:
             category, primary_method, primary_elapsed_ms = self.brain_service.classify_primary(
                 user_message, chat_history, key_index=brain_idx if brain_idx is not None else 0

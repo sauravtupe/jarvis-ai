@@ -57,12 +57,17 @@ def _atomic_write(data: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, DOUBTS_JSON_PATH)
-    try:
-        from app.services.storage_service import upload_bytes_to_s3
-        payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
-        upload_bytes_to_s3(payload, _STORAGE_KEY, content_type="application/json")
-    except Exception as e:
-        logger.warning("[DOUBTS] Durable sync of division_doubts.json failed: %s", e)
+    # Durable sync off the request path — a logged doubt must not delay the teacher's
+    # reply. The local write above is the source of truth; S3/HF is the backup copy.
+    payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+
+    def _upload():
+        try:
+            from app.services.storage_service import upload_bytes_to_s3
+            upload_bytes_to_s3(payload, _STORAGE_KEY, content_type="application/json")
+        except Exception as e:
+            logger.warning("[DOUBTS] Durable sync of division_doubts.json failed: %s", e)
+    threading.Thread(target=_upload, daemon=True).start()
 
 
 def _now() -> str:

@@ -87,24 +87,38 @@ class LectureCreate(BaseModel):
     class_name: str = Field(..., pattern=r'^(class_(1[0-2]|[1-9])|UKG)$')
     chapter: int = Field(..., ge=1, le=80)
     title: str = Field(..., min_length=1, max_length=120)
-    youtube_url: str = Field(..., min_length=1)
+    # Either a YouTube URL (legacy) or provider="cloudflare" + video_uid (private).
+    youtube_url: str = ""
+    provider: str = Field(default="youtube", pattern=r'^(youtube|cloudflare)$')
+    video_uid: str = ""
 
 
 class LectureUpdate(BaseModel):
     title: str = Field(..., min_length=1, max_length=120)
-    youtube_url: str = Field(..., min_length=1)
+    youtube_url: str = ""
+    provider: str = Field(default="youtube", pattern=r'^(youtube|cloudflare)$')
+    video_uid: str = ""
 
 
 class LectureRecord(BaseModel):
     class_name: str
     chapter: int
     title: str
-    youtube_url: str
-    video_id: str
+    provider: str = "youtube"
+    video_uid: str = ""
+    youtube_url: str = ""
+    video_id: str = ""
     notes_url: str = ""
     notes_type: str = ""
     created_at: str
     updated_at: str
+
+
+# Private video hosting (Cloudflare Stream)
+class DirectUploadRequest(BaseModel):
+    """Ask for a one-time browser→Cloudflare upload URL."""
+    name: str = Field(default="", max_length=120)
+    max_duration_seconds: int = Field(default=7200, ge=60, le=21600)
 
 
 class LectureListResponse(BaseModel):
@@ -227,3 +241,7 @@ class ClassCreate(BaseModel):
 class DivisionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=20)
     preferred_language: str = Field(default="en", max_length=2)
+
+
+class DivisionLanguageUpdate(BaseModel):
+    preferred_language: str = Field(..., max_length=2)

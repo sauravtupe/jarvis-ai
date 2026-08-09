@@ -346,6 +346,47 @@ def _try_assemblyai(video_id: str, api_key: str) -> str:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _assemblyai_transcribe_url(media_url: str, api_key: str) -> str:
+    """Transcribe a media URL directly with AssemblyAI (it fetches the URL itself).
+
+    Used for privately-hosted Cloudflare lectures: we hand AssemblyAI a short-lived
+    *signed* stream URL, so no audio is downloaded through this server and the video
+    stays private (the URL expires).
+    """
+    import requests as _req
+
+    headers_auth = {"authorization": api_key}
+    submit = _req.post(
+        "https://api.assemblyai.com/v2/transcript",
+        json={"audio_url": media_url, "language_detection": True},
+        headers={**headers_auth, "content-type": "application/json"},
+        timeout=30,
+    )
+    if submit.status_code != 200:
+        raise ValueError(f"ASSEMBLYAI_FAILED: submit ({submit.status_code}): {submit.text[:300]}")
+    transcript_id = submit.json().get("id")
+    if not transcript_id:
+        raise ValueError("ASSEMBLYAI_FAILED: no transcript ID returned")
+    logger.info("[ASSEMBLYAI] URL job submitted, id=%s. Polling...", transcript_id)
+
+    poll_url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
+    for attempt in range(200):  # up to ~10 minutes
+        time.sleep(3)
+        poll = _req.get(poll_url, headers=headers_auth, timeout=30)
+        poll.raise_for_status()
+        result = poll.json()
+        status = result.get("status")
+        if status == "completed":
+            text = (result.get("text") or "").strip()
+            if not text:
+                raise ValueError("ASSEMBLYAI_FAILED: empty transcript")
+            logger.info("[ASSEMBLYAI] Done: %d chars (attempt %d)", len(text), attempt + 1)
+            return text[:20000]
+        if status == "error":
+            raise ValueError(f"ASSEMBLYAI_FAILED: {result.get('error', 'unknown')}")
+    raise ValueError("ASSEMBLYAI_FAILED: timed out after 10 minutes")
+
+
 def _try_whisper(video_id: str) -> str:
     """Download audio with yt-dlp and transcribe via Groq Whisper (whisper-large-v3)."""
     import os
@@ -408,9 +449,55 @@ def _try_whisper(video_id: str) -> str:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def get_transcript(video_id: str) -> str:
-    """Fetch transcript via 5-tier fallback chain.
-    Tiers 1-2 work locally; Tier 3 (Supadata) works from any IP including HuggingFace cloud."""
+def _get_cloudflare_transcript(video_uid: str) -> str:
+    """Transcript for a privately-hosted Cloudflare lecture.
+
+    Tier 1: Cloudflare's auto-generated captions (free, no extra vendor).
+    Tier 2: AssemblyAI pointed at the signed HLS URL — it fetches the URL itself, so
+            no yt-dlp/audio download is needed. Guarantees a transcript when captions
+            aren't ready yet (caption generation is async after upload).
+    """
+    from config import ASSEMBLYAI_API_KEY
+    from app.services import video_service
+
+    for lang in ("en", "hi", "mr"):
+        try:
+            captions = video_service.get_captions(video_uid, lang)
+        except Exception as e:
+            logger.debug("[CF] Caption fetch error for %s (%s): %s", video_uid, lang, e)
+            captions = None
+        if captions:
+            logger.info("[CF] Transcript from Cloudflare captions (%s): %d chars", lang, len(captions))
+            return captions
+
+    # Captions not ready — ask Cloudflare to generate them for next time, then fall back.
+    try:
+        video_service.request_captions(video_uid, "en")
+    except Exception:
+        pass
+
+    if not ASSEMBLYAI_API_KEY:
+        raise ValueError(
+            "CF_NO_CAPTIONS: Cloudflare captions aren't ready for this lecture yet and "
+            "ASSEMBLYAI_API_KEY is not set. Add the key, or wait for captions to finish."
+        )
+    try:
+        signed_url = video_service.download_url(video_uid)
+    except Exception as e:
+        raise ValueError(f"CF_URL_FAILED: could not mint a signed URL for transcription: {e}")
+    logger.info("[CF] Captions unavailable — transcribing %s via AssemblyAI", video_uid)
+    return _assemblyai_transcribe_url(signed_url, ASSEMBLYAI_API_KEY)
+
+
+def get_transcript(video_id: str, provider: str = "youtube") -> str:
+    """Fetch a transcript for a lecture on either provider.
+
+    provider="cloudflare" → `video_id` is the Cloudflare UID (captions → AssemblyAI).
+    provider="youtube"    → the existing 5-tier YouTube chain below.
+    """
+    if provider == "cloudflare":
+        return _get_cloudflare_transcript(video_id)
+
     from config import ASSEMBLYAI_API_KEY, SUPADATA_API_KEYS
 
     # Tier 1: YouTube Transcript API (fast, free — blocked on HuggingFace IPs)

@@ -41,6 +41,19 @@ PROGRESS_JSON_PATH = BASE_DIR / "database" / "division_progress.json"
 # whether they've been resolved). Keyed by division_id, never by student.
 DOUBTS_JSON_PATH = BASE_DIR / "database" / "division_doubts.json"
 
+# ─── Private video hosting — Cloudflare Stream (Workstream A) ────────────────
+# Replaces YouTube for syllabus lectures. Videos are private: playback requires a
+# short-lived signed token minted here, and lectures open on our own /watch page.
+# When unset, video endpoints return 503 and existing YouTube lectures keep working.
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+CLOUDFLARE_STREAM_API_TOKEN = os.getenv("CLOUDFLARE_STREAM_API_TOKEN", "").strip()
+# Signing key pair from: POST /accounts/{id}/stream/keys  → returns `id` + `pem`.
+CLOUDFLARE_STREAM_KEY_ID = os.getenv("CLOUDFLARE_STREAM_KEY_ID", "").strip()
+CLOUDFLARE_STREAM_SIGNING_KEY = os.getenv("CLOUDFLARE_STREAM_SIGNING_KEY", "").strip()  # base64 PEM
+CLOUDFLARE_CUSTOMER_SUBDOMAIN = os.getenv("CLOUDFLARE_CUSTOMER_SUBDOMAIN", "").strip()
+# How long a playback token stays valid (seconds). Long enough for a full lecture.
+VIDEO_TOKEN_TTL = int(os.getenv("VIDEO_TOKEN_TTL", "14400"))  # 4 hours
+
 # ─── Security hardening ──────────────────────────────────────────────────────
 # CORS allowlist (CLAUDE.md rule #11). The frontend is served same-origin by
 # this app, so CORS only governs OTHER websites calling the API from a browser.
@@ -336,9 +349,14 @@ State each fact ONCE. Never repeat the same point. "A, B, and C." — not "A and
 _JARVIS_SYSTEM_PROMPT_BASE_FMT = _JARVIS_SYSTEM_PROMPT_BASE.format(assistant_name=ASSISTANT_NAME)
 
 _extras = []
-if JARVIS_OWNER_NAME:
+# "You were built for / your owner is …" is an AI-reveal: a human teacher was not
+# *built* for anyone. Skipped in CLASSROOM_MODE so the persona stays intact.
+if JARVIS_OWNER_NAME and not CLASSROOM_MODE:
     _extras.append(f"- IMPORTANT: You were built exclusively for {JARVIS_OWNER_NAME}. They are your owner. If anyone asks who your owner is, who made you, or who you serve — always answer: {JARVIS_OWNER_NAME}. Never say you have no owner.")
-if JARVIS_USER_TITLE:
+# In CLASSROOM_MODE the audience is a class of students, not a single owner — the
+# teacher persona addresses them as "students". Adding "address the user as Sir" here
+# directly contradicts that and is why replies leaked "Sir".
+if JARVIS_USER_TITLE and not CLASSROOM_MODE:
     _extras.append(f"- Address the user as: {JARVIS_USER_TITLE}")
 
 JARVIS_SYSTEM_PROMPT = _JARVIS_SYSTEM_PROMPT_BASE_FMT + ("\n" + "\n".join(_extras) if _extras else "")

@@ -273,6 +273,7 @@
             </div>
             <div class="lectures-body">
                 <button class="btn-primary lectures-add-btn" id="lectures-add-btn">+ Add Lecture</button>
+                <button class="btn-secondary lectures-dashboard-btn" id="dashboard-btn" title="Class analytics dashboard (admin only)">&#128202; Dashboard</button>
                 <button class="btn-secondary lectures-classrooms-btn" id="classrooms-btn" title="Manage Schools, Classes & Divisions (admin only)">&#127979; Manage Classrooms</button>
                 <button class="btn-secondary lectures-errors-btn" id="lectures-errors-btn" title="Recent backend + frontend errors (owner only)">&#9888; Recent Errors</button>
 
@@ -299,6 +300,22 @@
                         <input type="text" id="lecture-title" maxlength="120" placeholder="e.g. Fractions">
                     </div>
                     <div class="lecture-form-row">
+                        <label>Video source</label>
+                        <div class="lec-src-toggle">
+                            <label class="lec-src-opt"><input type="radio" name="lecture-provider" value="cloudflare" checked> &#128274; Private upload</label>
+                            <label class="lec-src-opt"><input type="radio" name="lecture-provider" value="youtube"> YouTube (legacy)</label>
+                        </div>
+                    </div>
+                    <div class="lecture-form-row" id="lecture-cf-row">
+                        <label for="lecture-video-file">Lecture video</label>
+                        <input type="file" id="lecture-video-file" accept="video/*">
+                        <div class="lec-upload-status" id="lecture-upload-status" style="display:none">
+                            <div class="lec-progress"><span class="lec-progress-fill" id="lecture-progress-fill"></span></div>
+                            <span class="lec-upload-text" id="lecture-upload-text">Uploading…</span>
+                        </div>
+                        <input type="text" id="lecture-video-uid" placeholder="…or paste an existing Cloudflare video ID" autocomplete="off">
+                    </div>
+                    <div class="lecture-form-row" id="lecture-yt-row" style="display:none">
                         <label for="lecture-url">YouTube URL</label>
                         <input type="text" id="lecture-url" placeholder="https://www.youtube.com/watch?v=...">
                     </div>
@@ -486,6 +503,27 @@
         </div>
     </div>
 
+    <!-- Analytics dashboard — AI Teacher Phase 4 (admin/teacher, full-screen) -->
+    <div id="dashboard-overlay">
+        <div class="dashboard-shell glass-panel">
+            <div class="dashboard-header">
+                <div class="dashboard-title-wrap">
+                    <h2 class="dashboard-title">Class Analytics</h2>
+                    <span class="dashboard-subtitle">AI Teacher · division-level reporting</span>
+                </div>
+                <div class="dashboard-actions">
+                    <button class="btn-secondary dashboard-refresh" id="dashboard-refresh" title="Refresh">&#8635; Refresh</button>
+                    <button class="lectures-close btn-icon" id="dashboard-close" title="Close" aria-label="Close dashboard">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="dashboard-body" id="dashboard-body">
+                <div class="dash-loading">Loading dashboard…</div>
+            </div>
+        </div>
+    </div>
+
     <!-- Classroom selection — AI Teacher Phase 1 (School -> Class -> Division) -->
     <div id="division-overlay">
         <div class="login-card glass-panel">
@@ -518,6 +556,7 @@
     <script src="school.js?v=20260622a"></script>
     <script src="learning.js?v=20260617f"></script>
     <script src="admin.js?v=20260616e"></script>
+    <script src="dashboard.js?v=20260727a"></script>
     <script src="media.js?v=20260617f"></script>
     <script src="script.js?v=20260618a"></script>
 </body>

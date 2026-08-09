@@ -130,6 +130,37 @@ _PERSONA_BREAK_RE = re.compile(
 )
 
 
+# --- Address rewriting ("Sir" → classroom voice) ------------------------------
+# Many canned responses predate the teacher persona and address a single owner as
+# "Sir". In a classroom the audience is the whole class. These patterns are
+# word-boundary anchored, so a partial streaming chunk simply doesn't match — it can
+# never corrupt mid-word text; the worst case is a miss.
+_ADDRESS_SUBS = (
+    # Longest / most specific first.
+    (re.compile(r"\bSure,\s*Sir[!.]", re.IGNORECASE), "Sure, students!"),
+    (re.compile(r"\bSorry\s+Sir\b,?", re.IGNORECASE), "Sorry students,"),
+    (re.compile(r",\s*Sir\b\s*—", re.IGNORECASE), ", students —"),
+    (re.compile(r",\s*Sir\b([.!?])", re.IGNORECASE), r", students\1"),
+    (re.compile(r",\s*Sir\b", re.IGNORECASE), ", students"),
+    (re.compile(r"\bSir,\s*", re.IGNORECASE), "Students, "),
+    (re.compile(r"\bfor you,\s*Sir\b", re.IGNORECASE), "for you, students"),
+    (re.compile(r"\bSir\b", re.IGNORECASE), "students"),
+)
+
+
+def to_classroom_voice(text: str) -> str:
+    """Rewrite single-user address ("Sir") into classroom address ("students").
+
+    Applied only in CLASSROOM_MODE. Safe on partial stream chunks: every pattern is
+    word-boundary anchored, so an incomplete fragment just won't match.
+    """
+    if not text or "sir" not in text.lower():
+        return text
+    for pattern, repl in _ADDRESS_SUBS:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def scrub_persona_breaks(text: str) -> str:
     """Remove rare 'as an AI / language model' slips from spoken text, then tidy spacing.
     Conservative: only strips the offending clause; leaves the rest of the sentence intact."""

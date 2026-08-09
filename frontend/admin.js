@@ -165,19 +165,27 @@ async function _refreshLecturesList() {
         }
         const html = Object.keys(groups).map(cls => {
             const friendlyClass = cls === 'UKG' ? 'UKG' : `Class ${cls.replace('class_', '')}`;
-            const items = groups[cls].map(l => `
+            const items = groups[cls].map(l => {
+                const isPrivate = l.provider === 'cloudflare';
+                const tag = isPrivate
+                    ? '<span class="lec-provider-tag lec-provider-tag--private">&#128274; PRIVATE</span>'
+                    : '<span class="lec-provider-tag lec-provider-tag--youtube">YOUTUBE</span>';
+                const srcLine = isPrivate
+                    ? `<a href="/watch/${_esc(l.class_name)}/${l.chapter}" target="_blank" rel="noopener">Open private lecture &rarr;</a>`
+                    : `<a href="${_esc(l.youtube_url)}" target="_blank" rel="noopener">${_esc(l.youtube_url)}</a>`;
+                return `
                 <div class="lecture-item" data-class="${l.class_name}" data-chapter="${l.chapter}">
                     <div class="lecture-item-info">
-                        <div class="lecture-item-title">Chapter ${l.chapter} — ${_esc(l.title)}</div>
-                        <div class="lecture-item-url"><a href="${_esc(l.youtube_url)}" target="_blank" rel="noopener">${_esc(l.youtube_url)}</a></div>
+                        <div class="lecture-item-title">Chapter ${l.chapter} — ${_esc(l.title)}${tag}</div>
+                        <div class="lecture-item-url">${srcLine}</div>
                     </div>
                     <div class="lecture-item-actions">
                         <button class="btn-mini lecture-edit-btn" data-class="${l.class_name}" data-chapter="${l.chapter}" title="Edit lecture">Edit</button>
                         <button class="btn-mini lecture-prac-btn" data-class="${l.class_name}" data-chapter="${l.chapter}" data-title="${_esc(l.title)}" title="Manage practical exercises">Practicals</button>
                         <button class="btn-mini lecture-del-btn" data-class="${l.class_name}" data-chapter="${l.chapter}" title="Delete lecture">Delete</button>
                     </div>
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
             return `
                 <div class="lecture-group">
                     <h4 class="lecture-group-title">${friendlyClass} <span class="lecture-group-count">(${groups[cls].length})</span></h4>
@@ -239,8 +247,13 @@ function _populateClassDropdown() {
     }
 }
 
+// The lecture currently open in the edit form (so saving without picking a new file
+// keeps the existing video). Null when adding.
+let _editingLecture = null;
+
 function _showLectureForm(mode, lec) {
     _populateClassDropdown();
+    _editingLecture = (mode === 'edit' && lec) ? lec : null;
     const form = $('lecture-form');
     const title = $('lecture-form-title');
     const mode_input = $('lecture-form-mode');
@@ -252,6 +265,13 @@ function _showLectureForm(mode, lec) {
     const notesUrl = $('lecture-notes-url');
     const err = $('lecture-form-error');
     if (err) err.style.display = 'none';
+    // Reset the private-upload widgets each time the form opens.
+    const fileEl = $('lecture-video-file'), uidEl = $('lecture-video-uid'),
+          upStatus = $('lecture-upload-status');
+    if (fileEl) fileEl.value = '';
+    if (uidEl) uidEl.value = '';
+    if (upStatus) upStatus.style.display = 'none';
+
     if (mode === 'edit' && lec) {
         if (title) title.textContent = `Edit Class ${lec.class_name.replace('class_', '')} Chapter ${lec.chapter}`;
         if (mode_input) mode_input.value = 'edit';
@@ -261,6 +281,10 @@ function _showLectureForm(mode, lec) {
         if (t) t.value = lec.title || '';
         if (url) url.value = lec.youtube_url || '';
         if (notesUrl) notesUrl.value = lec.notes_url || '';
+        const prov = lec.provider === 'cloudflare' ? 'cloudflare' : 'youtube';
+        const radio = document.querySelector(`input[name="lecture-provider"][value="${prov}"]`);
+        if (radio) radio.checked = true;
+        if (uidEl && lec.video_uid) uidEl.placeholder = `Current: ${lec.video_uid} (leave blank to keep)`;
     } else {
         if (title) title.textContent = 'Add Lecture';
         if (mode_input) mode_input.value = 'add';
@@ -270,7 +294,11 @@ function _showLectureForm(mode, lec) {
         if (t) t.value = '';
         if (url) url.value = '';
         if (notesUrl) notesUrl.value = '';
+        const radio = document.querySelector('input[name="lecture-provider"][value="cloudflare"]');
+        if (radio) radio.checked = true;
+        if (uidEl) uidEl.placeholder = '…or paste an existing Cloudflare video ID';
     }
+    _syncProviderRows();
     if (form) form.style.display = '';
 }
 
@@ -280,6 +308,71 @@ function _hideLectureForm() {
 }
 
 const _YT_RE = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?(?:[^&]*&)*v=|embed\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i;
+const _CF_UID_RE = /^[a-f0-9]{32}$/i;
+
+// ─── Private video upload (Cloudflare Stream) ────────────────────────────────
+// The file goes browser → Cloudflare directly using a one-time URL minted by our
+// server, so large lectures never pass through the backend.
+
+function _selectedProvider() {
+    const checked = document.querySelector('input[name="lecture-provider"]:checked');
+    return checked ? checked.value : 'cloudflare';
+}
+
+function _syncProviderRows() {
+    const isCF = _selectedProvider() === 'cloudflare';
+    const cf = $('lecture-cf-row'), yt = $('lecture-yt-row');
+    if (cf) cf.style.display = isCF ? '' : 'none';
+    if (yt) yt.style.display = isCF ? 'none' : '';
+}
+
+function _setUploadProgress(pct, text) {
+    const wrap = $('lecture-upload-status'), fill = $('lecture-progress-fill'), label = $('lecture-upload-text');
+    if (wrap) wrap.style.display = '';
+    if (fill) fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    if (label) label.textContent = text;
+}
+
+/** Upload a file to Cloudflare Stream. Resolves to the video UID. */
+function _uploadLectureVideo(file, name) {
+    return new Promise(async (resolve, reject) => {
+        let up;
+        try {
+            const res = await _adminFetch('/videos/direct-upload', {
+                method: 'POST',
+                body: JSON.stringify({ name: name || file.name }),
+            });
+            if (!res.ok) {
+                let d = `HTTP ${res.status}`;
+                try { const j = await res.json(); d = j.detail || d; } catch (_) {}
+                return reject(new Error(d));
+            }
+            up = await res.json();
+        } catch (e) { return reject(e); }
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', up.upload_url, true);
+        xhr.upload.onprogress = e => {
+            if (e.lengthComputable) {
+                const pct = (e.loaded / e.total) * 100;
+                _setUploadProgress(pct, `Uploading… ${pct.toFixed(0)}%`);
+            }
+        };
+        xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                _setUploadProgress(100, 'Upload complete — Cloudflare is processing the video.');
+                resolve(up.uid);
+            } else {
+                reject(new Error(`Upload failed (HTTP ${xhr.status})`));
+            }
+        };
+        xhr.onerror = () => reject(new Error('Upload failed — network error.'));
+        const fd = new FormData();
+        fd.append('file', file);
+        _setUploadProgress(0, 'Starting upload…');
+        xhr.send(fd);
+    });
+}
 
 async function _saveLectureForm() {
     const mode = ($('lecture-form-mode') || {}).value || 'add';
@@ -303,7 +396,38 @@ async function _saveLectureForm() {
     if (!ch || ch < 1 || ch > 80) return setErr('Chapter must be a number between 1 and 80.');
     if (!titleVal) return setErr('Title is required.');
     if (titleVal.length > 120) return setErr('Title must be 120 characters or fewer.');
-    if (!_YT_RE.test(urlVal)) return setErr('Please enter a valid YouTube URL.');
+
+    // Resolve the video source for the selected provider.
+    const provider = _selectedProvider();
+    let videoUid = '';
+    if (provider === 'cloudflare') {
+        const fileEl = $('lecture-video-file');
+        const pastedUid = (($('lecture-video-uid') || {}).value || '').trim();
+        const file = fileEl && fileEl.files && fileEl.files[0];
+        const existingUid = (mode === 'edit' && _editingLecture) ? (_editingLecture.video_uid || '') : '';
+        if (file) {
+            if (saveBtn) saveBtn.disabled = true;
+            try {
+                videoUid = await _uploadLectureVideo(file, titleVal);
+            } catch (e) {
+                if (saveBtn) saveBtn.disabled = false;
+                return setErr(`Video upload failed: ${e.message}`);
+            }
+        } else if (pastedUid) {
+            if (!_CF_UID_RE.test(pastedUid)) return setErr('Cloudflare video ID must be 32 hex characters.');
+            videoUid = pastedUid;
+        } else if (existingUid) {
+            videoUid = existingUid;   // editing without replacing the video
+        } else {
+            return setErr('Choose a video file to upload, or paste an existing Cloudflare video ID.');
+        }
+    } else if (!_YT_RE.test(urlVal)) {
+        return setErr('Please enter a valid YouTube URL.');
+    }
+
+    const videoPayload = provider === 'cloudflare'
+        ? { provider: 'cloudflare', video_uid: videoUid }
+        : { provider: 'youtube', youtube_url: urlVal };
 
     if (saveBtn) saveBtn.disabled = true;
     try {
@@ -311,21 +435,18 @@ async function _saveLectureForm() {
         if (mode === 'edit') {
             res = await _adminFetch(`/lectures/${cls}/${ch}`, {
                 method: 'PUT',
-                body: JSON.stringify({ title: titleVal, youtube_url: urlVal }),
+                body: JSON.stringify({ title: titleVal, ...videoPayload }),
             });
         } else {
-            res = await _adminFetch('/lectures', {
-                method: 'POST',
-                body: JSON.stringify({ class_name: cls, chapter: ch, title: titleVal, youtube_url: urlVal }),
-            });
+            const addBody = { class_name: cls, chapter: ch, title: titleVal, ...videoPayload };
+            res = await _adminFetch('/lectures', { method: 'POST', body: JSON.stringify(addBody) });
             if (res.status === 409) {
                 if (!confirm(`A lecture already exists at Class ${cls.replace('class_', '')} Chapter ${ch}. Overwrite it?`)) {
                     if (saveBtn) saveBtn.disabled = false;
                     return;
                 }
                 res = await _adminFetch('/lectures?overwrite=true', {
-                    method: 'POST',
-                    body: JSON.stringify({ class_name: cls, chapter: ch, title: titleVal, youtube_url: urlVal }),
+                    method: 'POST', body: JSON.stringify(addBody),
                 });
             }
         }
@@ -460,6 +581,8 @@ async function _toggleErrorsView() {
         if (errorsBtn) errorsBtn.addEventListener('click', _toggleErrorsView);
         if (formCancel) formCancel.addEventListener('click', _hideLectureForm);
         if (formSave) formSave.addEventListener('click', _saveLectureForm);
+        document.querySelectorAll('input[name="lecture-provider"]').forEach(r =>
+            r.addEventListener('change', _syncProviderRows));
         if (signinBtn) signinBtn.addEventListener('click', _openAdminModal);
         if (signoutBtn) signoutBtn.addEventListener('click', _signOutAdmin);
         if (modalSubmit) modalSubmit.addEventListener('click', _submitAdminToken);
@@ -775,10 +898,17 @@ function _crRenderSchool(s) {
 }
 
 function _crRenderClass(schoolId, c) {
-    const divs = (c.divisions || []).map(d => `
-        <span class="cr-div">${_esc(d.name)} <em>(${_crLangLabel(d.preferred_language)})</em>
+    const divs = (c.divisions || []).map(d => {
+        const cur = d.preferred_language || 'en';
+        const opts = _CR_LANGS.map(([v, l]) =>
+            `<option value="${v}"${v === cur ? ' selected' : ''}>${l}</option>`).join('');
+        return `
+        <span class="cr-div">${_esc(d.name)}
+          <select class="cr-div-lang-edit" data-cr-lang="1" data-school="${schoolId}" data-class="${c.id}" data-div="${d.id}"
+                  title="Language of instruction">${opts}</select>
           <button class="cr-del" data-cr="del-div" data-school="${schoolId}" data-class="${c.id}" data-div="${d.id}" title="Delete division">✕</button>
-        </span>`).join('');
+        </span>`;
+    }).join('');
     return `
       <div class="cr-class">
         <div class="cr-class-head">
@@ -871,6 +1001,18 @@ async function _crTreeClick(e) {
         if (closeBtn) closeBtn.addEventListener('click', _closeClassroomsPanel);
         if (addSchoolBtn) addSchoolBtn.addEventListener('click', _crAddSchool);
         if (tree) tree.addEventListener('click', _crTreeClick);
+        // Language-of-instruction dropdown per division (change, not click).
+        if (tree) tree.addEventListener('change', async e => {
+            const sel = e.target.closest('[data-cr-lang]');
+            if (!sel) return;
+            _crShowError('');
+            const res = await _adminFetch(
+                `/schools/${sel.getAttribute('data-school')}/classes/${sel.getAttribute('data-class')}`
+                + `/divisions/${sel.getAttribute('data-div')}/language`,
+                { method: 'PUT', body: JSON.stringify({ preferred_language: sel.value }) },
+            );
+            if (await _crHandle(res, 'Language updated.')) _refreshClassrooms();
+        });
         if (nameInput) nameInput.addEventListener('keydown', ev => {
             if (ev.key === 'Enter') { ev.preventDefault(); _crAddSchool(); }
         });
