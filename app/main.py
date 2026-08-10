@@ -16,6 +16,7 @@ import time
 import re
 import base64
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import edge_tts
 
@@ -61,6 +62,7 @@ from app.services import school_service
 from app.services import progress_service
 from app.services import doubts_service
 from app.services import video_service
+from app.services import tts_cache
 from app.middleware.auth import get_optional_user
 from app.services.storage_service import (
     upload_bytes_to_s3, startup_restore_from_s3,
@@ -330,6 +332,47 @@ async def lifespan(app: FastAPI):
             except Exception as _tts_e:
                 logger.error("  - TTS: FAILED — %s", _tts_e)
         asyncio.create_task(_bg_tts_selftest())
+
+        # Prebake the fixed classroom lines into the TTS cache (Workstream B2). These are
+        # spoken on the hot paths ("start the class", revision, language switch), and each
+        # costs ~400 ms of Azure round-trip the first time. Runs in a worker thread so it
+        # never delays serving; after the first run the audio is on disk, so restarts skip
+        # straight to loading it.
+        def _prewarm_tts():
+            try:
+                from app.services.chat_service import canned_spoken_lines
+            except Exception as e:
+                logger.warning("[TTS-CACHE] Prewarm skipped — %s", e)
+                return
+            entries, seen = [], set()
+            for text, lang in canned_spoken_lines():
+                spoken = to_classroom_voice(text) if CLASSROOM_MODE else text
+                for sent in _plan_tts_sentences(spoken):
+                    if CLASSROOM_MODE:
+                        sent = scrub_persona_breaks(sent)
+                    if not sent or not sent.strip():
+                        continue
+                    # Cover both voice-selection routes: an explicit conversation language
+                    # and the script-detection fallback used when none is set. For Marathi
+                    # these differ (mr-IN vs the Devanagari default hi-IN), so prebaking
+                    # only one would still miss half the time.
+                    for voice in {_pick_tts_voice(sent, lang), _pick_tts_voice(sent, None)}:
+                        if (sent, voice) in seen:
+                            continue
+                        seen.add((sent, voice))
+                        entries.append((sent, voice, TTS_RATE))
+            if not entries:
+                return
+            t0 = time.perf_counter()
+            made = tts_cache.prewarm(
+                entries, _synthesize_tts_uncached, gain=_TTS_VOLUME_GAIN,
+            )
+            logger.info(
+                "  - TTS cache: %d canned lines ready (%d newly synthesized) in %.1fs",
+                len(entries), made, time.perf_counter() - t0,
+            )
+
+        threading.Thread(target=_prewarm_tts, name="tts-prewarm", daemon=True).start()
 
         logger.info("=" * 60)
         logger.info("J.A.R.V.I.S is online and ready!")
@@ -622,6 +665,47 @@ def _merge_short(sentences):
 
     return merged
 
+def _plan_tts_sentences(text: str):
+    """The exact strings `_stream_generator` would hand to TTS for `text`.
+
+    TTS is synthesized per *sentence*, never per whole reply, so prebaking a canned
+    reply verbatim would never be hit. This replays the same split/merge/hold logic
+    for the single-chunk case — which is how canned replies are yielded (`yield _resp`)
+    — so the prebaked keys match what the live path actually asks for.
+
+    Prebaking is best-effort: if this ever drifts from the generator, the only cost is
+    a cache miss that the live path fills on first use. It can never produce wrong audio.
+    """
+    out, held = [], None
+    sentences, buffer = _split_sentences(text)
+    sentences = _merge_short(sentences)
+
+    for i, sent in enumerate(sentences):
+        if len(sent.split()) < _MIN_WORDS:
+            continue
+        is_last = (i == len(sentences) - 1)
+        if held:
+            out.append(held)
+            held = None
+        if is_last and _should_hold_sentence_for_continuation(sent):
+            held = sent
+        else:
+            out.append(sent)
+
+    remaining = buffer.strip()
+    if held:
+        if remaining and len(remaining.split()) <= _MERGE_IF_WORDS:
+            out.append((held + " " + remaining).strip())
+        else:
+            out.append(held)
+            if remaining:
+                out.append(remaining)
+    elif remaining:
+        out.append(remaining)
+
+    return [s for s in out if s and s.strip()]
+
+
 # Volume boost gain applied to all TTS output via ffmpeg post-processing.
 # 1.0 = no boost (current default — user reported the native Azure voice is loud enough).
 # Raise (e.g. 1.5–1.8) only if a deployment has audibly quiet audio.
@@ -726,11 +810,13 @@ _OPENAI_TTS_INSTRUCTIONS = (
 )
 
 
-def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
+def _synthesize_tts_uncached(text: str, voice: str, rate: str) -> bytes:
     """Two-tier TTS:
        1. Azure AI Speech with en-IN-PrabhatNeural (user's preferred Indian voice)
        2. OpenAI gpt-4o-mini-tts with 'ash' as fallback if Azure not configured/fails
     Volume boost is applied only when `_TTS_VOLUME_GAIN != 1.0`; defaults to no-op.
+
+    Callers should use `_generate_tts_sync`, which layers the audio cache on top.
     """
     # Tier 1: Azure (native Indian voice — preferred when configured)
     azure_voice = voice if voice and voice.endswith("Neural") else "en-IN-PrabhatNeural"
@@ -788,6 +874,24 @@ def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
         logger.error("[TTS] OpenAI tts-1 fallback failed: %s", e)
 
     return b""
+
+
+def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
+    """Cached TTS — the entry point every caller should use.
+
+    A large share of classroom speech is fixed strings (start/next lecture, revision,
+    "watch and come back", …). Synthesizing those costs ~400 ms of Azure round-trip
+    for bytes we already have, so they are served from cache and the round-trip
+    disappears. Cache misses fall straight through to `_synthesize_tts_uncached`,
+    so behaviour is identical apart from latency.
+    """
+    audio, was_cached = tts_cache.synthesize_cached(
+        text, voice, rate, _TTS_VOLUME_GAIN,
+        lambda: _synthesize_tts_uncached(text, voice, rate),
+    )
+    if was_cached:
+        logger.info("[TTS] cache HIT len=%d voice=%s", len(audio), voice)
+    return audio
 
 
 _LANG_VOICE = {

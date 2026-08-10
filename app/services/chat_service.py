@@ -115,6 +115,31 @@ _START_NEEDS_DIVISION = {
     "mr": "सुरू करण्यापूर्वी, कृपया वरील classroom बटणाने तुमची शाळा, वर्ग आणि तुकडी निवडा — मग म्हणा 'क्लास सुरू कर'.",
 }
 
+# Tables whose entries are spoken verbatim on hot classroom paths. main.py prebakes
+# these into the TTS cache at startup so the ~400 ms Azure round-trip never lands on
+# a student's first spoken word.
+_SPOKEN_CANNED_TABLES = (
+    _VIDEO_WAIT, _VIDEO_READY, _REVISE_NOTHING, _START_NEEDS_DIVISION,
+    _START_NO_LECTURES, _START_ALL_DONE, _LANG_CONFIRMATIONS,
+)
+
+
+def canned_spoken_lines():
+    """[(text, lang)] for every fixed reply that has no runtime placeholders.
+
+    Templates containing {ch}/{title}/{cls}/{n} are skipped: their text varies per
+    lecture, so there is no stable string to prebake. The check is on the text itself
+    rather than a hand-maintained list, so adding a placeholder to an existing line
+    drops it from the prebake set automatically instead of caching a wrong variant.
+    """
+    lines = []
+    for table in _SPOKEN_CANNED_TABLES:
+        for lang, text in table.items():
+            if "{" in text or not text.strip():
+                continue
+            lines.append((text, lang))
+    return lines
+
 
 # One-shot LLM directives for assessment / doubts (Phase 3). These are meta-instructions
 # to the teacher LLM (kept in English); the persona + language directive already force
