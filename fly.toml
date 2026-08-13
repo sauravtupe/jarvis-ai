@@ -1,0 +1,67 @@
+# fly.toml — always-on deployment in Mumbai (Workstream B1).
+#
+# The point of this move is latency: HuggingFace Spaces sleep, so the first request
+# after an idle period paid a 30-60s cold start. Here the machine never stops
+# (auto_stop_machines = "off" + min_machines_running = 1), and "bom" puts it in
+# Mumbai — the closest Fly region to the students.
+#
+# Change `app` to whatever name you registered; it must be globally unique on Fly.
+
+app = "jarvis-teacher"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # The Dockerfile honours $PORT (defaulting to 7860 so the HF Space keeps working
+  # unchanged). Fly's convention is 8080.
+  PORT = "8080"
+  PYTHONUNBUFFERED = "1"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # ALWAYS ON. This is the single most important line in the file — flipping
+  # auto_stop_machines to "stop" reintroduces exactly the cold start we are paying
+  # to remove.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    # SSE chat streams are long-lived, so a low cap would queue students behind each
+    # other. These are generous on purpose.
+    soft_limit = 40
+    hard_limit = 60
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "90s"      # torch + sentence-transformers take a while to import
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 2
+  # torch + sentence-transformers + faiss are memory-hungry. 2 GB is the working
+  # minimum; raise to "4gb" if you see OOM kills in `fly logs`.
+  memory = "2gb"
+
+# NO VOLUME ON PURPOSE.
+#
+# A volume mounted at /app/database would shadow database/learning_data/userdata.txt,
+# which ships inside the image and feeds the FAISS memory index — on first deploy the
+# empty volume would hide it and the assistant would silently lose its personal memory.
+#
+# It is also unnecessary: storage_service already syncs lectures, schools, progress,
+# doubts and chats to S3 durably (/health reports "durable": true, "app_data": "s3")
+# and restores them at startup. The only thing not persisted is the prebaked TTS cache,
+# which simply resynthesizes in ~18s in a background thread after each deploy without
+# delaying any request.
+#
+# If you later want the TTS cache to survive deploys, mount a volume at a narrow path
+# such as /app/database/tts_cache — never at /app/database itself.

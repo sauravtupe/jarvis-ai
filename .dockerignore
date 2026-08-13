@@ -1,0 +1,60 @@
+# Keep the build context small and the image clean. Without this, `fly deploy`
+# uploads .venv and .git (hundreds of MB) on every deploy, and secrets in .env
+# would be baked into the image layer.
+
+# Secrets — never bake these in. Both hosts inject config as env vars/secrets.
+.env
+.env.*
+!.env.example
+
+# Local virtualenv — the image installs its own dependencies.
+.venv/
+venv/
+env/
+
+# VCS + tooling
+.git/
+.gitignore
+.github/
+.claude/
+.idea/
+.vscode/
+
+# Python build noise
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data. Excluded per-subdirectory rather than as a whole `database/`, because
+# Docker cannot re-include a path whose parent directory is excluded — a blanket
+# `database/` would silently drop database/learning_data/userdata.txt, which the FAISS
+# memory index is built from, with no error at build time.
+database/chats_data/
+database/vector_store/
+database/camera_captures/
+database/quizzes/
+database/tts_cache/
+# Live state belongs in S3, not baked into an image layer where a deploy would
+# resurrect a stale copy over newer data. Listed individually rather than as
+# `database/*.json` so it is obvious what is dropped, and so nothing nested
+# (database/uploads/records.json) is caught by accident.
+database/lectures.json
+database/schools.json
+database/division_progress.json
+database/division_doubts.json
+
+# Logs and local scratch
+*.log
+_server_*.log
+_commitmsg.txt
+_maharaja_analysis/
+system-role.zip
+
+# Docs and tests aren't needed at runtime
+docs/
+tests/
+*.md
+!README.md
