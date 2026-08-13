@@ -3,11 +3,72 @@
 // Defines: PreStarterPlayer, TTSPlayer, _browserSpeak, speakMessageButton,
 // addSpeakButton, speakText, _cancelQuizSpeech. No behavior change.
 
+// How long a reply may take before the "one moment please" filler is worth playing.
+// The filler exists to cover a LONG wait. Once the TTS cache landed, canned replies
+// come back in well under a second, so playing it immediately meant the filler was
+// still talking when the real answer started — two voices at once. Arming it on a
+// delay means a fast reply silences it before it ever makes a sound.
+const PRE_STARTER_DELAY_MS = 1500;
+// Fade instead of a hard pause, so a cancel mid-word doesn't click.
+const PRE_STARTER_FADE_MS = 150;
+
 class PreStarterPlayer {
     constructor() {
         this.audio = document.createElement('audio');
         this.audio.preload = 'auto';
+        this._timer = null;
+        this._fade = null;
+        this._speaking = false;   // true only while this player owns the audio channel
     }
+
+    // Schedule the filler. If the real reply starts speaking first, `cancel()` fires
+    // before this timer does and nothing is ever heard.
+    arm(delayMs) {
+        this.cancel({ silent: true });
+        const wait = typeof delayMs === 'number' ? delayMs : PRE_STARTER_DELAY_MS;
+        this._timer = setTimeout(() => {
+            this._timer = null;
+            this.play();
+        }, wait);
+    }
+
+    // Stop the filler, whether it is still pending or already audible.
+    //
+    // `silent: true` means the real TTS is taking over the audio channel. In that case
+    // we must NOT call _onJarvisSpeechEnd(): `_jarvisSpeaking` is a plain boolean, not a
+    // refcount, so clearing it here would re-open the mic while Jarvis is still talking
+    // and let him hear himself — the feedback loop the flag exists to prevent. The
+    // incoming TTSPlayer owns the flag from that point and clears it when it finishes.
+    cancel(opts) {
+        const silent = !!(opts && opts.silent);
+        if (this._timer) {
+            clearTimeout(this._timer);
+            this._timer = null;
+        }
+        if (!this._speaking) return;
+        this._speaking = false;
+        this.audio.onended = null;
+        this.audio.onerror = null;
+
+        const el = this.audio;
+        const startVol = el.volume;
+        const steps = 5;
+        let i = 0;
+        if (this._fade) clearInterval(this._fade);
+        this._fade = setInterval(() => {
+            i += 1;
+            el.volume = Math.max(0, startVol * (1 - i / steps));
+            if (i >= steps) {
+                clearInterval(this._fade);
+                this._fade = null;
+                try { el.pause(); } catch (_) {}
+                el.volume = startVol;   // restore for the next filler
+            }
+        }, PRE_STARTER_FADE_MS / steps);
+
+        if (!silent) _onJarvisSpeechEnd();
+    }
+
     play(onComplete) {
         const loaded = PRE_STARTER_FILES.filter(f => PRE_STARTER_CACHE[f]);
         if (loaded.length === 0) {
@@ -26,6 +87,7 @@ class PreStarterPlayer {
         const done = () => {
             if (fired) return;
             fired = true;
+            this._speaking = false;
             this.audio.onended = null;
             this.audio.onerror = null;
             _onJarvisSpeechEnd();
@@ -33,6 +95,7 @@ class PreStarterPlayer {
         };
         this.audio.onended = done;
         this.audio.onerror = done;
+        this._speaking = true;
         _onJarvisSpeechStart();
         const p = this.audio.play();
         if (p) p.catch(done);
@@ -209,6 +272,12 @@ class TTSPlayer {
     async _playLoop() {
         if (this.playing) return;
         this.playing = true;
+        // The real answer is about to speak — silence the "one moment" filler first so
+        // the two never overlap. `silent: true` hands the mic-mute flag over to us
+        // rather than clearing it (see PreStarterPlayer.cancel).
+        if (typeof preStarterPlayer !== 'undefined' && preStarterPlayer) {
+            preStarterPlayer.cancel({ silent: true });
+        }
         _onJarvisSpeechStart();
         this._loopId = (this._loopId || 0) + 1;
         const myId = this._loopId;

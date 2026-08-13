@@ -1393,7 +1393,9 @@ async function sendMessage(textOverride) {
     const controller = new AbortController();
     try {
         if (ttsPlayer?.enabled && settings.thinkingSounds && preStarterPlayer) {
-            preStarterPlayer.play(() => {});
+            // Armed, not played: a reply that comes back quickly cancels this before it
+            // is ever heard. Only a genuinely slow reply gets the filler.
+            preStarterPlayer.arm();
         }
         timeoutId = setTimeout(() => controller.abort(), 300000);
         const _ttsFlag = !!(ttsPlayer && ttsPlayer.enabled);
@@ -1571,6 +1573,11 @@ async function sendMessage(textOverride) {
         showToast(msg, 6000);
     } finally {
         clearTimeout(timeoutId);
+        // Disarm any filler still waiting to fire. Without this, a reply that produced
+        // no audio at all (TTS off, or an aborted stream) would let the timer fire after
+        // the exchange was over and speak "one moment please" into silence.
+        // Not silent: nothing is taking over, so the mic-mute flag must be released.
+        if (preStarterPlayer) preStarterPlayer.cancel();
         isStreaming = false;
         _attachmentInFlight = false;
         if (sendBtn) sendBtn.disabled = false;
