@@ -4,7 +4,7 @@ Run this before EVERY deploy. It verifies syntax + every core feature
 end-to-end against a running server.
 
     python smoke_test.py                 # against http://localhost:8000
-    python smoke_test.py --prod          # against the live HF Space
+    python smoke_test.py --prod          # against the live Fly.io machine
     python smoke_test.py --base-url URL  # against any deployment
     python smoke_test.py --full          # adds slow checks: MCQ generation
                                          # (consumes 1 Supadata call) and
@@ -24,7 +24,9 @@ from pathlib import Path
 
 import requests
 
-PROD_URL = "https://saurav9404-jarvis-ai.hf.space"
+# Production moved from HF Spaces to an always-on Fly machine in Mumbai; the
+# Space is kept only as a cold standby, so --prod must point here.
+PROD_URL = "https://jarvis-teacher.fly.dev"
 ROOT = Path(__file__).resolve().parent
 
 # Streamed chat answers can legitimately take a while on a cold cloud start.
@@ -415,7 +417,7 @@ def main():
     print("\nServer checks:")
     if check_health(base) == "FAIL":
         print("\nServer unreachable or unhealthy - aborting feature checks.")
-        print("(Local: start it with `python run.py`. Prod: the Space may be cold; retry in 60s.)")
+        print("(Local: start it with `python run.py`. Prod: check `fly status` / `fly logs`.)")
         sys.exit(1)
     check_chat(base)
     check_chat_tts(base)
